@@ -46,10 +46,19 @@ CREATE TABLE IF NOT EXISTS lost_opportunities (
   potential_revenue_loss  NUMERIC NOT NULL DEFAULT 0,
   salesman_id             INTEGER NOT NULL REFERENCES users(id),
   notes                   TEXT DEFAULT '',
+  period                  TEXT,                    -- 'YYYY-MM' logged in; drives Lost Opps vs Archive
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_lost_salesman ON lost_opportunities(salesman_id);
+
+-- For databases that already had this table before monthly archiving was
+-- added: add the column if it's missing, backfill any existing rows to the
+-- current month (so nothing already logged disappears), then lock it down.
+ALTER TABLE lost_opportunities ADD COLUMN IF NOT EXISTS period TEXT;
+UPDATE lost_opportunities SET period = to_char(now(), 'YYYY-MM') WHERE period IS NULL;
+ALTER TABLE lost_opportunities ALTER COLUMN period SET NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_lost_period ON lost_opportunities(period);
 
 -- Session store for connect-pg-simple (it will also create this itself if
 -- missing, but declaring it here keeps one place that owns the schema).
