@@ -123,6 +123,7 @@
       case 'archive': renderArchiveView(done); break;
       case 'archiveMonth': renderArchiveMonthView(currentView.period, done); break;
       case 'lostOpps': renderLostOppsView(done); break;
+      case 'lostOppReport': renderLostOppReportView(currentView.id, done); break;
       case 'team': renderTeamView(done); break;
       default: renderDashboard(done);
     }
@@ -481,9 +482,10 @@
       if (!lost.length) {
         html += '<div class="table-wrap"><div class="empty-state"><h3>None logged</h3></div></div>';
       } else {
-        html += '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Company</th><th>Reason</th><th>Potential Loss</th><th>Salesman</th></tr></thead><tbody>' +
+        html += '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Company</th><th>Reason</th><th>Potential Loss</th><th>Salesman</th><th></th></tr></thead><tbody>' +
           lost.map(function (o) {
-            return '<tr><td>' + esc(o.lost_code) + '</td><td>' + esc(o.company) + '</td><td>' + esc(o.reason || '—') + '</td><td class="money">' + fmtMoney(o.potential_revenue_loss) + '</td><td>' + esc(o.salesman_name) + '</td></tr>';
+            return '<tr><td>' + esc(o.lost_code) + '</td><td>' + esc(o.company) + '</td><td>' + esc(o.reason || '—') + '</td><td class="money">' + fmtMoney(o.potential_revenue_loss) + '</td><td>' + esc(o.salesman_name) + '</td>' +
+              '<td style="text-align:right"><button class="icon-btn" title="View" data-open-lost-report="' + o.id + '">⊙</button></td></tr>';
           }).join('') + '</tbody></table></div>';
       }
       done(html);
@@ -509,10 +511,31 @@
           return '<tr><td>' + esc(o.lost_code) + '</td><td>' + esc(o.company) + '</td><td>' + esc(o.contact || '—') + '</td><td>' + esc(o.service_type || '—') + '</td><td>' + esc(o.reason || '—') + '</td>' +
             '<td class="money">' + fmtMoney(o.potential_revenue_loss) + '</td><td>' + esc(o.salesman_name) + '</td>' +
             '<td><div class="row-actions">' +
+            '<button class="icon-btn" title="View" data-open-lost-report="' + o.id + '">⊙</button>' +
             '<button class="icon-btn" title="Edit" data-edit-lost="' + o.id + '">✎</button>' +
             (isAdmin() ? '<button class="icon-btn" title="Delete" data-delete-lost="' + o.id + '">✕</button>' : '') +
             '</div></td></tr>';
         }).join('') + '</tbody></table></div>';
+      done(html);
+    }).catch(function (err) { done(errorState(err)); });
+  }
+  function renderLostOppReportView(id, done) {
+    api('GET', '/api/lost-opportunities/' + id).then(function (data) {
+      var o = data.lostOpportunity;
+      var html = '<div class="report-toolbar">' +
+        '<button class="btn btn-ghost" data-nav="lostOpps">← Back to Lost Opportunities</button>' +
+        '<div style="display:flex;gap:10px">' +
+        (isAdmin() ? '<button class="btn btn-ghost" data-delete-lost="' + o.id + '" data-after="lostOpps">Delete</button>' : '') +
+        '</div></div>';
+      html += '<div class="report">' +
+        '<div class="report-head"><div><div class="report-kicker">Lost Opportunity</div><div class="report-id">' + esc(o.lost_code) + '</div></div></div>' +
+        '<h1 class="report-title">' + esc(o.company || 'Untitled') + '</h1>' +
+        '<div class="report-status-row"><span class="report-value">' + fmtMoney(o.potential_revenue_loss) + ' potential loss</span></div>' +
+        '<div class="report-grid">' +
+        rg('Contact', o.contact) + rg('Service Type', o.service_type) + rg('Reason Lost', o.reason) + rg('Salesman', o.salesman_name) +
+        '</div>' +
+        '<div class="rg-item"><label>Notes</label><div class="report-notes">' + (o.notes ? esc(o.notes) : '<span class="empty">No notes on file.</span>') + '</div></div>' +
+        '</div>';
       done(html);
     }).catch(function (err) { done(errorState(err)); });
   }
@@ -603,6 +626,9 @@
     });
     document.querySelectorAll('[data-open-archive]').forEach(function (el) {
       el.addEventListener('click', function () { route('archiveMonth', { period: el.getAttribute('data-open-archive') }); });
+    });
+    document.querySelectorAll('[data-open-lost-report]').forEach(function (el) {
+      el.addEventListener('click', function () { route('lostOppReport', { id: el.getAttribute('data-open-lost-report') }); });
     });
 
     var logoutBtn = document.getElementById('logout-btn');
