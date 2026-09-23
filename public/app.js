@@ -15,6 +15,7 @@
   var loginError = '';
   var roster = [];
   var team = [];
+  var lostOpps = [];
 
   var app = document.getElementById('app');
   var toastEl = document.getElementById('toast');
@@ -439,9 +440,12 @@
 
   /* ---------------- archive ---------------- */
   function renderArchiveView(done) {
-    api('GET', '/api/leads/periods').then(function (data) {
-      var periods = data.periods;
-      var html = '<div class="view-head"><div><h1 class="view-title">Archive</h1><p class="view-sub">Past months’ accounts, kept for reference.</p></div></div>';
+    Promise.all([
+      api('GET', '/api/leads/periods'),
+      api('GET', '/api/lost-opportunities/periods'),
+    ]).then(function (results) {
+      var periods = Array.from(new Set(results[0].periods.concat(results[1].periods))).sort().reverse();
+      var html = '<div class="view-head"><div><h1 class="view-title">Archive</h1><p class="view-sub">Past months’ accounts and lost opportunities, kept for reference.</p></div></div>';
       if (!periods.length) {
         html += '<div class="table-wrap"><div class="empty-state"><h3>Nothing archived yet</h3><p>Past months will show up here once a new month begins.</p></div></div>';
         return done(html);
@@ -453,19 +457,35 @@
     }).catch(function (err) { done(errorState(err)); });
   }
   function renderArchiveMonthView(period, done) {
-    api('GET', '/api/leads?period=' + encodeURIComponent(period)).then(function (data) {
-      var leads = data.leads;
+    Promise.all([
+      api('GET', '/api/leads?period=' + encodeURIComponent(period)),
+      api('GET', '/api/lost-opportunities?period=' + encodeURIComponent(period)),
+    ]).then(function (results) {
+      var leads = results[0].leads;
+      var lost = results[1].lostOpportunities;
       var html = '<div class="view-head"><div><p class="view-kicker">Archived · ' + esc(monthLabel(period)) + '</p><h1 class="view-title">' + esc(monthLabel(period)) + '</h1></div>' +
         '<button class="btn btn-ghost" data-nav="archive">← Back to Archive</button></div>';
+
+      html += '<h2 class="panel-title" style="margin:24px 0 8px">Accounts</h2>';
       if (!leads.length) {
         html += '<div class="table-wrap"><div class="empty-state"><h3>No accounts</h3></div></div>';
-        return done(html);
+      } else {
+        html += '<div class="table-wrap"><table><thead><tr><th>Lead ID</th><th>Company</th><th>Stage</th><th>Deal Value</th><th>Salesman</th><th></th></tr></thead><tbody>' +
+          leads.map(function (l) {
+            return '<tr><td>' + esc(l.lead_code) + '</td><td>' + esc(l.company) + '</td><td>' + stageChip(l.stage) + '</td><td class="money">' + fmtMoney(l.deal_value) + '</td><td>' + esc(l.salesman_name) + '</td>' +
+              '<td style="text-align:right"><button class="icon-btn" title="View" data-open-report="' + l.id + '">⊙</button></td></tr>';
+          }).join('') + '</tbody></table></div>';
       }
-      html += '<div class="table-wrap"><table><thead><tr><th>Lead ID</th><th>Company</th><th>Stage</th><th>Deal Value</th><th>Salesman</th><th></th></tr></thead><tbody>' +
-        leads.map(function (l) {
-          return '<tr><td>' + esc(l.lead_code) + '</td><td>' + esc(l.company) + '</td><td>' + stageChip(l.stage) + '</td><td class="money">' + fmtMoney(l.deal_value) + '</td><td>' + esc(l.salesman_name) + '</td>' +
-            '<td style="text-align:right"><button class="icon-btn" title="View" data-open-report="' + l.id + '">⊙</button></td></tr>';
-        }).join('') + '</tbody></table></div>';
+
+      html += '<h2 class="panel-title" style="margin:24px 0 8px">Lost Opportunities</h2>';
+      if (!lost.length) {
+        html += '<div class="table-wrap"><div class="empty-state"><h3>None logged</h3></div></div>';
+      } else {
+        html += '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Company</th><th>Reason</th><th>Potential Loss</th><th>Salesman</th></tr></thead><tbody>' +
+          lost.map(function (o) {
+            return '<tr><td>' + esc(o.lost_code) + '</td><td>' + esc(o.company) + '</td><td>' + esc(o.reason || '—') + '</td><td class="money">' + fmtMoney(o.potential_revenue_loss) + '</td><td>' + esc(o.salesman_name) + '</td></tr>';
+          }).join('') + '</tbody></table></div>';
+      }
       done(html);
     }).catch(function (err) { done(errorState(err)); });
   }
@@ -474,45 +494,68 @@
   function renderLostOppsView(done) {
     api('GET', '/api/lost-opportunities').then(function (data) {
       var rows = data.lostOpportunities;
+      lostOpps = rows;
       var totalLoss = rows.reduce(function (a, o) { return a + Number(o.potential_revenue_loss || 0); }, 0);
       var html = '<div class="view-head"><div><p class="view-kicker">' + rows.length + ' record' + (rows.length === 1 ? '' : 's') + ' · ' + fmtMoney(totalLoss) + ' potential revenue lost</p>' +
-        '<h1 class="view-title">Lost Opportunities</h1><p class="view-sub">A running log of business that didn’t close.</p></div>' +
+        '<h1 class="view-title">Lost Opportunities</h1><p class="view-sub">A running log of business that didn’t close. This list is the current month — last month is in Archive.</p></div>' +
         '<button class="btn btn-primary" id="btn-add-lost">+ Log Lost Opportunity</button></div>';
       html += '<div id="lost-form-slot"></div>';
       if (!rows.length) {
         html += '<div class="table-wrap"><div class="empty-state"><h3>Nothing logged yet</h3></div></div>';
         return done(html);
       }
-      html += '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Company</th><th>Contact</th><th>Service Type</th><th>Reason</th><th>Potential Loss</th><th>Salesman</th>' + (isAdmin() ? '<th></th>' : '') + '</tr></thead><tbody>' +
+      html += '<div class="table-wrap"><table><thead><tr><th>ID</th><th>Company</th><th>Contact</th><th>Service Type</th><th>Reason</th><th>Potential Loss</th><th>Salesman</th><th></th></tr></thead><tbody>' +
         rows.map(function (o) {
           return '<tr><td>' + esc(o.lost_code) + '</td><td>' + esc(o.company) + '</td><td>' + esc(o.contact || '—') + '</td><td>' + esc(o.service_type || '—') + '</td><td>' + esc(o.reason || '—') + '</td>' +
             '<td class="money">' + fmtMoney(o.potential_revenue_loss) + '</td><td>' + esc(o.salesman_name) + '</td>' +
-            (isAdmin() ? '<td><div class="row-actions"><button class="icon-btn" title="Delete" data-delete-lost="' + o.id + '">✕</button></div></td>' : '') +
-            '</tr>';
+            '<td><div class="row-actions">' +
+            '<button class="icon-btn" title="Edit" data-edit-lost="' + o.id + '">✎</button>' +
+            (isAdmin() ? '<button class="icon-btn" title="Delete" data-delete-lost="' + o.id + '">✕</button>' : '') +
+            '</div></td></tr>';
         }).join('') + '</tbody></table></div>';
       done(html);
     }).catch(function (err) { done(errorState(err)); });
   }
-  function lostOppFormHtml() {
-    return '<div class="panel form-wrap"><form id="lost-form">' +
-      fieldHtml('lo-company', 'Company', '', true) +
-      '<div class="field-row">' + fieldHtml('lo-contact', 'Contact', '') + selectHtml('lo-service', 'Service Type', '', SERVICE_TYPES) + '</div>' +
-      '<div class="field-row">' + fieldHtml('lo-reason', 'Reason Lost', '') + fieldHtml('lo-loss', 'Potential Revenue Loss ($)', '', false, 'number') + '</div>' +
-      '<div class="field"><label>Notes</label><textarea id="f-lo-notes"></textarea></div>' +
+  function lostOppFormHtml(editing) {
+    var f = editing || {};
+    var idField = editing ? '<input type="hidden" id="f-lo-id" value="' + editing.id + '">' : '';
+    var salesmanField;
+    if (isAdmin()) {
+      salesmanField = selectHtml('lo-salesman_id', 'Salesman', String(f.salesman_id || currentUser.id), null, team.filter(function (u) { return u.role === 'salesman'; }).map(function (u) { return { value: u.id, label: u.name }; }));
+    } else {
+      salesmanField = '<div class="field"><label>Salesman</label><input type="text" value="' + esc(editing ? editing.salesman_name : currentUser.name) + '" disabled></div>';
+    }
+    return '<div class="panel form-wrap"><form id="lost-form">' + idField +
+      fieldHtml('lo-company', 'Company', f.company, true) +
+      '<div class="field-row">' + fieldHtml('lo-contact', 'Contact', f.contact) + selectHtml('lo-service', 'Service Type', f.service_type || '', SERVICE_TYPES) + '</div>' +
+      '<div class="field-row">' + fieldHtml('lo-reason', 'Reason Lost', f.reason) + fieldHtml('lo-loss', 'Potential Revenue Loss ($)', f.potential_revenue_loss, false, 'number') + '</div>' +
+      '<div class="field-row">' + salesmanField + '</div>' +
+      '<div class="field"><label>Notes</label><textarea id="f-lo-notes">' + esc(f.notes || '') + '</textarea></div>' +
       '<div id="lost-form-error"></div>' +
-      '<div class="form-actions"><button type="submit" class="btn btn-primary">Save</button><button type="button" class="btn btn-ghost" id="lost-form-cancel">Cancel</button></div>' +
+      '<div class="form-actions"><button type="submit" class="btn btn-primary">' + (editing ? 'Save Changes' : 'Save') + '</button><button type="button" class="btn btn-ghost" id="lost-form-cancel">Cancel</button></div>' +
       '</form></div>';
+  }
+  function openLostForm(editing) {
+    loadTeamIfAdmin(function () {
+      document.getElementById('lost-form-slot').innerHTML = lostOppFormHtml(editing);
+      document.getElementById('lost-form').addEventListener('submit', submitLostOppForm);
+      document.getElementById('lost-form-cancel').addEventListener('click', function () { document.getElementById('lost-form-slot').innerHTML = ''; });
+    });
   }
   function submitLostOppForm(e) {
     e.preventDefault();
+    var idEl = document.getElementById('f-lo-id');
     var company = val('f-lo-company');
     var errEl = document.getElementById('lost-form-error');
     if (!company) { errEl.innerHTML = '<p class="form-error">Company is required.</p>'; return; }
-    api('POST', '/api/lost-opportunities', {
+    var body = {
       company: company, contact: val('f-lo-contact'), service_type: val('f-lo-service'),
       reason: val('f-lo-reason'), potential_revenue_loss: Number(val('f-lo-loss')) || 0, notes: val('f-lo-notes'),
-    }).then(function () {
-      toast('Lost opportunity logged.');
+    };
+    if (isAdmin()) body.salesman_id = val('f-lo-salesman_id');
+    var req = idEl ? api('PUT', '/api/lost-opportunities/' + idEl.value, body) : api('POST', '/api/lost-opportunities', body);
+    req.then(function () {
+      toast(idEl ? 'Lost opportunity updated.' : 'Lost opportunity logged.');
       route('lostOpps');
     }).catch(function (err) {
       errEl.innerHTML = '<p class="form-error">' + esc((err.details && err.details[0]) || 'Could not save.') + '</p>';
@@ -586,10 +629,15 @@
     if (printBtn) printBtn.addEventListener('click', function () { window.print(); });
 
     var addLostBtn = document.getElementById('btn-add-lost');
-    if (addLostBtn) addLostBtn.addEventListener('click', function () {
-      document.getElementById('lost-form-slot').innerHTML = lostOppFormHtml();
-      document.getElementById('lost-form').addEventListener('submit', submitLostOppForm);
-      document.getElementById('lost-form-cancel').addEventListener('click', function () { document.getElementById('lost-form-slot').innerHTML = ''; });
+    if (addLostBtn) addLostBtn.addEventListener('click', function () { openLostForm(null); });
+
+    document.querySelectorAll('[data-edit-lost]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-edit-lost');
+        var record = null;
+        for (var i = 0; i < lostOpps.length; i++) { if (String(lostOpps[i].id) === String(id)) { record = lostOpps[i]; break; } }
+        openLostForm(record);
+      });
     });
 
     document.querySelectorAll('[data-delete-lead]').forEach(function (btn) {
