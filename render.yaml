@@ -1,0 +1,22 @@
+databases:
+  - name: yjcrm-db
+    plan: free
+    databaseName: yjcrm
+    user: yjcrm
+
+services:
+  - type: web
+    name: yellowjacket-sales-crm
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm run migrate && npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: yjcrm-db
+          property: connectionString
+      - key: SESSION_SECRET
+        generateValue: true
