@@ -79,6 +79,21 @@ async function getLostOr404(req, res) {
   return row;
 }
 
+// GET /api/lost-opportunities/:id — single record, for the read-only View
+// screen. A salesman may only view their own; admin may view any.
+router.get('/:id', async (req, res, next) => {
+  try {
+    const row = await getLostOr404(req, res);
+    if (!row) return;
+    if (!isAdmin(req) && row.salesman_id !== req.session.user.id) {
+      return res.status(403).json({ error: 'not_yours' });
+    }
+    res.json({ lostOpportunity: row });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/lost-opportunities — create. Salesmen are always tagged with
 // their own id, regardless of what (if anything) is sent for salesman_id.
 router.post('/', async (req, res, next) => {
