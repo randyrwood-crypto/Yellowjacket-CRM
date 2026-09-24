@@ -125,6 +125,7 @@
       case 'lostOpps': renderLostOppsView(done); break;
       case 'lostOppReport': renderLostOppReportView(currentView.id, done); break;
       case 'team': renderTeamView(done); break;
+      case 'changePassword': renderChangePasswordView(done); break;
       default: renderDashboard(done);
     }
   }
@@ -162,7 +163,10 @@
       '<ul class="nav">' + navHtml + '</ul>' +
       '<div class="rail-foot">' +
       '<div class="rail-badge' + (isAdmin() ? ' admin' : '') + '">' + esc(isAdmin() ? 'Admin Mode' : currentUser.name) + '</div>' +
+      '<div style="display:flex;flex-direction:column;gap:8px;align-items:flex-start">' +
+      '<button id="change-pw-btn">Change Password</button>' +
       '<button id="logout-btn">Log Out</button>' +
+      '</div>' +
       '</div>' +
       '</div>'
     );
@@ -585,6 +589,45 @@
     });
   }
 
+  /* ---------------- change password (self-service) ---------------- */
+  function renderChangePasswordView(done) {
+    var html = '<div class="view-head"><div><h1 class="view-title">Change Password</h1><p class="view-sub">Update the password you sign in with.</p></div></div>';
+    html += '<div class="panel form-wrap"><form id="change-pw-form">' +
+      fieldHtml('cp-current', 'Current Password', '', true, 'password') +
+      fieldHtml('cp-new', 'New Password', '', true, 'password') +
+      fieldHtml('cp-confirm', 'Confirm New Password', '', true, 'password') +
+      '<div id="change-pw-error"></div>' +
+      '<div class="form-actions"><button type="submit" class="btn btn-primary">Update Password</button>' +
+      '<button type="button" class="btn btn-ghost" data-nav="dashboard">Cancel</button></div>' +
+      '</form></div>';
+    done(html);
+  }
+  function submitChangePasswordForm(e) {
+    e.preventDefault();
+    var current = val('f-cp-current');
+    var next = val('f-cp-new');
+    var confirm = val('f-cp-confirm');
+    var errEl = document.getElementById('change-pw-error');
+    if (!current || !next || !confirm) {
+      errEl.innerHTML = '<p class="form-error">All fields are required.</p>';
+      return;
+    }
+    if (next.length < 8) {
+      errEl.innerHTML = '<p class="form-error">New password must be at least 8 characters.</p>';
+      return;
+    }
+    if (next !== confirm) {
+      errEl.innerHTML = '<p class="form-error">New passwords do not match.</p>';
+      return;
+    }
+    api('PUT', '/api/auth/password', { currentPassword: current, newPassword: next }).then(function () {
+      toast('Password updated.');
+      route('dashboard');
+    }).catch(function (err) {
+      errEl.innerHTML = '<p class="form-error">' + esc((err.details && err.details[0]) || (err.code === 'wrong_password' ? 'Current password is incorrect.' : 'Could not update password.')) + '</p>';
+    });
+  }
+
   /* ---------------- team (admin) ---------------- */
   function renderTeamView(done) {
     api('GET', '/api/team').then(function (data) {
@@ -635,6 +678,11 @@
     if (logoutBtn) logoutBtn.addEventListener('click', function () {
       api('POST', '/api/auth/logout').then(function () { currentUser = null; loginMode = 'salesman'; loginError = ''; loadRoster(function () { render(); }); });
     });
+
+    var changePwBtn = document.getElementById('change-pw-btn');
+    if (changePwBtn) changePwBtn.addEventListener('click', function () { route('changePassword'); });
+    var changePwForm = document.getElementById('change-pw-form');
+    if (changePwForm) changePwForm.addEventListener('submit', submitChangePasswordForm);
 
     var loginForm = document.getElementById('login-form');
     if (loginForm) loginForm.addEventListener('submit', function (e) {
