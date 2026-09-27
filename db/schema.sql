@@ -60,6 +60,35 @@ UPDATE lost_opportunities SET period = to_char(now(), 'YYYY-MM') WHERE period IS
 ALTER TABLE lost_opportunities ALTER COLUMN period SET NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_lost_period ON lost_opportunities(period);
 
+-- A "win" is a dollar amount a salesman logs against a lead — it does NOT
+-- change the lead's stage, so partial wins can be logged over time on a
+-- deal that's still open (e.g. a customer commits to part of the work now,
+-- the rest later). The dashboard's Won total is the sum of these entries
+-- for the period, not just leads whose stage happens to say "Won".
+CREATE TABLE IF NOT EXISTS lead_wins (
+  id          SERIAL PRIMARY KEY,
+  lead_id     INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+  amount      NUMERIC NOT NULL,
+  note        TEXT DEFAULT '',
+  salesman_id INTEGER NOT NULL REFERENCES users(id),
+  period      TEXT NOT NULL,           -- 'YYYY-MM' the win was logged in (drives the dashboard's Won total)
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_lead_wins_lead ON lead_wins(lead_id);
+CREATE INDEX IF NOT EXISTS idx_lead_wins_period ON lead_wins(period);
+CREATE INDEX IF NOT EXISTS idx_lead_wins_salesman ON lead_wins(salesman_id);
+
+-- Backfill: any lead already marked Won with a deal value, from before this
+-- win-tracking table existed, gets one matching win entry so its revenue
+-- isn't suddenly missing from the dashboard's Won total. Guarded so it only
+-- ever runs once per lead.
+INSERT INTO lead_wins (lead_id, amount, note, salesman_id, period, created_at)
+SELECT leads.id, leads.deal_value, 'Migrated automatically from this lead''s Won stage.',
+       leads.salesman_id, leads.period, leads.updated_at
+FROM leads
+WHERE leads.stage = 'Won' AND leads.deal_value > 0
+  AND NOT EXISTS (SELECT 1 FROM lead_wins WHERE lead_wins.lead_id = leads.id);
+
 -- Session store for connect-pg-simple (it will also create this itself if
 -- missing, but declaring it here keeps one place that owns the schema).
 CREATE TABLE IF NOT EXISTS "session" (
