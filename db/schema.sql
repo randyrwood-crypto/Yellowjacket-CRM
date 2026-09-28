@@ -36,6 +36,43 @@ CREATE TABLE IF NOT EXISTS leads (
 CREATE INDEX IF NOT EXISTS idx_leads_salesman ON leads(salesman_id);
 CREATE INDEX IF NOT EXISTS idx_leads_period ON leads(period);
 
+-- An Account is one company/customer — the persistent record a customer's
+-- leads are grouped under, so the same company's history lives in one
+-- place instead of scattered, disconnected lead rows. "company" on leads
+-- above is kept only as a historical snapshot column (never dropped, for
+-- safety); the app reads company/contact/phone/email through the account
+-- from here on.
+CREATE TABLE IF NOT EXISTS accounts (
+  id          SERIAL PRIMARY KEY,
+  name        TEXT NOT NULL UNIQUE,
+  contact     TEXT DEFAULT '',
+  phone       TEXT DEFAULT '',
+  email       TEXT DEFAULT '',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS account_id INTEGER REFERENCES accounts(id);
+CREATE INDEX IF NOT EXISTS idx_leads_account ON leads(account_id);
+
+-- Consolidate any leads created before Accounts existed: one Account per
+-- distinct company name, carrying over that company's contact/phone/email.
+-- Guarded on both ends (NOT EXISTS + account_id IS NULL) so re-running this
+-- migration never creates a duplicate account or reassigns an already-set
+-- lead.
+INSERT INTO accounts (name, contact, phone, email)
+SELECT DISTINCT ON (leads.company) leads.company, leads.contact, leads.phone, leads.email
+FROM leads
+WHERE leads.account_id IS NULL
+  AND leads.company IS NOT NULL AND leads.company <> ''
+  AND NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.name = leads.company)
+ORDER BY leads.company, leads.updated_at DESC
+ON CONFLICT (name) DO NOTHING;
+
+UPDATE leads SET account_id = accounts.id
+FROM accounts
+WHERE accounts.name = leads.company AND leads.account_id IS NULL;
+
 CREATE TABLE IF NOT EXISTS lost_opportunities (
   id                      SERIAL PRIMARY KEY,
   lost_code               TEXT NOT NULL UNIQUE,    -- e.g. LO-0001
