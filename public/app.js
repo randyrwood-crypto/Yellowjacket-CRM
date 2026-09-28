@@ -952,3 +952,124 @@
         hint.className = 'hint';
       } else {
         hint.textContent = 'New account "' + v + '" will be created.';
+        hint.className = 'hint new';
+      }
+    });
+
+    var addLostBtn = document.getElementById('btn-add-lost');
+    if (addLostBtn) addLostBtn.addEventListener('click', function () { openLostForm(null); });
+
+    document.querySelectorAll('[data-edit-lost]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-edit-lost');
+        var record = null;
+        for (var i = 0; i < lostOpps.length; i++) { if (String(lostOpps[i].id) === String(id)) { record = lostOpps[i]; break; } }
+        openLostForm(record);
+      });
+    });
+
+    document.querySelectorAll('[data-delete-lead]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-delete-lead');
+        var key = 'lead-' + id;
+        if (deleteArmed !== key) {
+          deleteArmed = key;
+          btn.textContent = '✕ Confirm?';
+          setTimeout(function () { if (deleteArmed === key) deleteArmed = null; }, 4000);
+          return;
+        }
+        deleteArmed = null;
+        api('DELETE', '/api/leads/' + id).then(function () {
+          toast('Lead deleted.');
+          accountLeadsCache = {};
+          var after = btn.getAttribute('data-after');
+          route(after || 'accounts');
+        }).catch(function () { toast('Could not delete.', true); });
+      });
+    });
+    document.querySelectorAll('[data-delete-lost]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-delete-lost');
+        var key = 'lost-' + id;
+        if (deleteArmed !== key) {
+          deleteArmed = key;
+          btn.textContent = '✕';
+          btn.title = 'Confirm delete?';
+          setTimeout(function () { if (deleteArmed === key) deleteArmed = null; }, 4000);
+          return;
+        }
+        deleteArmed = null;
+        api('DELETE', '/api/lost-opportunities/' + id).then(function () { toast('Removed.'); route('lostOpps'); }).catch(function () { toast('Could not delete.', true); });
+      });
+    });
+
+    var addUserForm = document.getElementById('add-user-form');
+    if (addUserForm) addUserForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var errEl = document.getElementById('add-user-error');
+      api('POST', '/api/team', { name: val('f-nu-name'), password: val('f-nu-pass'), role: val('f-nu-role') }).then(function () {
+        toast('Team member added.');
+        route('team');
+      }).catch(function (err) {
+        errEl.innerHTML = '<p class="form-error">' + esc((err.details && err.details[0]) || (err.code === 'name_taken' ? 'That name is already in use.' : 'Could not add.')) + '</p>';
+      });
+    });
+    document.querySelectorAll('[data-reset-pw]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-reset-pw');
+        var pw = window.prompt('New temporary password for this person (min 8 characters):');
+        if (!pw) return;
+        api('PUT', '/api/team/' + id + '/password', { password: pw }).then(function () { toast('Password reset.'); }).catch(function () { toast('Could not reset password (min 8 characters).', true); });
+      });
+    });
+    document.querySelectorAll('[data-remove-user]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-remove-user');
+        var key = 'user-' + id;
+        if (deleteArmed !== key) {
+          deleteArmed = key;
+          btn.textContent = 'Confirm?';
+          setTimeout(function () { if (deleteArmed === key) deleteArmed = null; }, 4000);
+          return;
+        }
+        deleteArmed = null;
+        api('DELETE', '/api/team/' + id).then(function () { toast('Removed.'); route('team'); }).catch(function (err) {
+          toast(err.message || 'Could not remove — they may have records on file.', true);
+        });
+      });
+    });
+
+    var qs = document.getElementById('q-search');
+    if (qs) qs.addEventListener('input', function () { tableFilter.q = qs.value; route('accounts'); });
+    var qSalesman = document.getElementById('q-salesman');
+    if (qSalesman) qSalesman.addEventListener('change', function () { salesmanFilter = qSalesman.value; render(); });
+    var qSalesmanArchive = document.getElementById('q-salesman-archive');
+    if (qSalesmanArchive) qSalesmanArchive.addEventListener('change', function () { salesmanFilter = qSalesmanArchive.value; render(); });
+  }
+
+  function doLogin(name, password) {
+    if (!name) { loginError = 'Select your name.'; render(); return; }
+    api('POST', '/api/auth/login', { name: name, password: password }).then(function (data) {
+      currentUser = data.user;
+      loginError = '';
+      route('dashboard');
+    }).catch(function () {
+      loginError = 'Incorrect name or password.';
+      render();
+    });
+  }
+
+  /* ---------------- boot ---------------- */
+  function boot() {
+    api('GET', '/api/auth/me').then(function (data) {
+      currentUser = data.user;
+      if (currentUser) {
+        route('dashboard');
+      } else {
+        loadRoster(function () { render(); });
+      }
+    }).catch(function () { loadRoster(function () { render(); }); });
+  }
+
+  boot();
+})();
