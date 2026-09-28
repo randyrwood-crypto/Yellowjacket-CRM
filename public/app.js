@@ -11,6 +11,7 @@
   var currentUser = null;
   var currentView = { view: 'login' };
   var tableFilter = { q: '', stage: '', service: '' };
+  var salesmanFilter = ''; // admin-only, shared across Leads / Lost Opportunities / Archive
   var loginMode = 'salesman';
   var loginError = '';
   var roster = [];
@@ -220,6 +221,7 @@
       html += '<div class="hl-bar">' +
         '<div class="hl-seg"><div class="hl-label">Open Leads</div><div class="hl-value">' + stats.totals.lead_count + '</div></div>' +
         '<div class="hl-seg"><div class="hl-label">Pipeline Value</div><div class="hl-value">' + fmtMoney(stats.totals.pipeline_value) + '</div></div>' +
+        '<div class="hl-seg"><div class="hl-label">Won This Month</div><div class="hl-value" style="color:var(--stage-won)">' + fmtMoney(stats.wonTotal) + '</div></div>' +
         '<div class="hl-seg"><div class="hl-label">Overdue Follow-Ups</div><div class="hl-value">' + stats.overdueCount + '</div></div>' +
         '</div>';
 
@@ -255,18 +257,35 @@
   }
 
   /* ---------------- leads list ---------------- */
+  // Admin-only "filter by salesman" <select>, shared markup for Leads,
+  // Lost Opportunities, and the Archive month view. Requires `team` to
+  // already be loaded (see loadTeamIfAdmin).
+  function salesmanFilterHtml(id) {
+    if (!isAdmin()) return '';
+    var salesmen = team.filter(function (u) { return u.role === 'salesman'; });
+    return '<select class="filter-sel" id="' + id + '"><option value="">All salesmen</option>' +
+      salesmen.map(function (u) {
+        return '<option value="' + u.id + '"' + (String(salesmanFilter) === String(u.id) ? ' selected' : '') + '>' + esc(u.name) + '</option>';
+      }).join('') + '</select>';
+  }
+
   function renderLeadsView(done) {
-    api('GET', '/api/leads').then(function (data) {
+    var url = '/api/leads' + (salesmanFilter ? '?salesman_id=' + encodeURIComponent(salesmanFilter) : '');
+    Promise.all([api('GET', url), new Promise(function (resolve) { loadTeamIfAdmin(resolve); })]).then(function (results) {
+      var data = results[0];
       var leads = data.leads;
       var html = '<div class="view-head"><div><p class="view-kicker">' + leads.length + ' account' + (leads.length === 1 ? '' : 's') + '</p>' +
         '<h1 class="view-title">Leads &amp; Accounts</h1>' +
         '<p class="view-sub">' + (isAdmin() ? 'Search, filter, and open any account.' : 'Search, filter, and open your accounts.') + ' This list is the current month — last month is in Archive.</p></div>' +
-        '<button class="btn btn-primary" data-nav="form">+ New Lead</button></div>';
+        '<div style="display:flex;gap:10px">' +
+        (isAdmin() ? '<button class="btn btn-ghost" id="btn-export-pdf">⎙ Export PDF</button>' : '') +
+        '<button class="btn btn-primary" data-nav="form">+ New Lead</button></div></div>';
 
       html += '<div class="toolbar">' +
         '<div class="search"><input type="text" id="q-search" placeholder="Search company, contact, or site…" value="' + esc(tableFilter.q) + '"></div>' +
         '<select class="filter-sel" id="q-stage"><option value="">All stages</option>' + STAGES.map(function (s) { return '<option value="' + esc(s) + '"' + (tableFilter.stage === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('') + '</select>' +
         '<select class="filter-sel" id="q-service"><option value="">All services</option>' + SERVICE_TYPES.map(function (s) { return '<option value="' + esc(s) + '"' + (tableFilter.service === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('') + '</select>' +
+        salesmanFilterHtml('q-salesman') +
         '</div>';
 
       var rows = leads.filter(function (l) {
@@ -347,7 +366,8 @@
           html += '<div class="field-row">' + fieldHtml('deal_value', 'Est. Deal Value ($)', f.deal_value, false, 'number') +
             '<div class="field"><label>Salesman</label><input type="text" value="' + esc(editing ? editing.salesman_name : currentUser.name) + '" disabled></div></div>';
         }
-        html += '<div class="field-row">' + fieldHtml('last_contact', 'Last Contact', f.last_contact ? String(f.last_contact).slice(0,10) : '', false, 'date') + fieldHtml('next_follow_up', 'Next Follow-Up', f.next_follow_up ? String(f.next_follow_up).slice(0,10) : '', false, 'date') + '</div>';
+        html += '<div class="field-row">' + fieldHtml('next_follow_up', 'Next Follow-Up', f.next_follow_up ? String(f.next_follow_up).slice(0,10) : '', false, 'date') +
+          '<div class="field"><label>Last Contact</label><input type="text" value="' + (editing ? esc(fmtDate(editing.last_contact)) : 'Today, once saved') + '" disabled></div></div>';
         html += '<div class="field"><label>Notes</label><textarea id="f-notes">' + esc(f.notes || '') + '</textarea></div>';
         html += '<div id="form-error"></div>';
         html += '<div class="form-actions"><button type="submit" class="btn btn-primary">' + (editing ? 'Save Changes' : '✓ Save Lead') + '</button>' +
@@ -397,7 +417,7 @@
       site: val('f-site'), county: val('f-county'), location: val('f-location'),
       service_type: val('f-service_type'), stage: val('f-stage') || 'New Lead',
       deal_value: Number(val('f-deal_value')) || 0,
-      last_contact: val('f-last_contact') || null, next_follow_up: val('f-next_follow_up') || null,
+      next_follow_up: val('f-next_follow_up') || null,
       notes: val('f-notes'),
     };
     if (isAdmin()) body.salesman_id = val('f-salesman_id');
@@ -412,9 +432,13 @@
   }
 
   /* ---------------- report ---------------- */
+  var currentReportLeadId = null;
+
   function renderReportView(id, done) {
-    api('GET', '/api/leads/' + id).then(function (data) {
-      var l = data.lead;
+    currentReportLeadId = id;
+    Promise.all([api('GET', '/api/leads/' + id), api('GET', '/api/leads/' + id + '/wins')]).then(function (results) {
+      var l = results[0].lead;
+      var wins = results[1].wins;
       var canEdit = isAdmin() || l.salesman_id === currentUser.id;
       var od = isOverdue(l);
       var html = '<div class="report-toolbar">' +
@@ -427,20 +451,57 @@
       html += '<div class="report">' +
         '<div class="report-head"><div><div class="report-kicker">Account Profile</div><div class="report-id">' + esc(l.lead_code) + '</div></div></div>' +
         '<h1 class="report-title">' + esc(l.company || 'Untitled Account') + '</h1>' +
-        '<div class="report-status-row">' + stageChip(l.stage) + '<span class="report-value">' + fmtMoney(l.deal_value) + '</span>' +
+        '<div class="report-status-row">' + stageChip(l.stage) + '<span class="report-value">' + fmtMoney(l.deal_value) + ' deal value</span>' +
+        '<span class="chip" style="color:var(--stage-won);border-color:var(--stage-won)">' + fmtMoney(l.won_to_date) + ' won to date</span>' +
         (od ? '<span class="chip" style="color:var(--overdue);border-color:var(--overdue)">Follow-up overdue</span>' : '') + '</div>' +
         '<div class="report-grid">' +
         rg('Primary Contact', l.contact) + rg('Phone', l.phone) + rg('Email', l.email) + rg('Salesman', l.salesman_name) +
         rg('Lease / Well / Site', l.site) + rg('County / Basin', l.county) + rg('Location / Address', l.location) + rg('Service Type', l.service_type) +
         rg('Last Contact', l.last_contact ? fmtDate(l.last_contact) : '') + rg('Next Follow-Up', l.next_follow_up ? fmtDate(l.next_follow_up) : '') +
         '</div>' +
-        '<div class="rg-item"><label>Notes</label><div class="report-notes">' + (l.notes ? esc(l.notes) : '<span class="empty">No notes on file.</span>') + '</div></div>' +
-        '</div>';
+        '<div class="rg-item"><label>Notes</label><div class="report-notes">' + (l.notes ? esc(l.notes) : '<span class="empty">No notes on file.</span>') + '</div></div>';
+
+      if (canEdit) {
+        html += '<div class="rg-item"><label>Log A Win</label>' +
+          '<form id="win-form" style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap">' +
+          '<div class="field"><label>Amount ($)</label><input type="number" id="f-win-amount" min="0" step="0.01"></div>' +
+          '<div class="field"><label>Note (optional)</label><input type="text" id="f-win-note" placeholder="e.g. First phase deposit"></div>' +
+          '<div class="field" style="flex:0"><button type="submit" class="btn btn-primary">+ Log Win</button></div>' +
+          '</form><div id="win-form-error"></div></div>';
+      }
+
+      html += '<div class="rg-item"><label>Win History</label>';
+      if (!wins.length) {
+        html += '<div class="report-notes"><span class="empty">No wins logged yet.</span></div>';
+      } else {
+        html += '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Amount</th><th>Note</th>' + (isAdmin() ? '<th></th>' : '') + '</tr></thead><tbody>' +
+          wins.map(function (w) {
+            return '<tr><td>' + esc(fmtDate(w.created_at)) + '</td><td class="money">' + fmtMoney(w.amount) + '</td><td>' + esc(w.note || '—') + '</td>' +
+              (isAdmin() ? '<td style="text-align:right"><button class="icon-btn" title="Delete" data-delete-win="' + w.id + '">✕</button></td>' : '') +
+              '</tr>';
+          }).join('') + '</tbody></table></div>';
+      }
+      html += '</div></div>';
       done(html);
     }).catch(function (err) { done(errorState(err)); });
   }
   function rg(label, value) {
     return '<div class="rg-item"><label>' + esc(label) + '</label><div>' + (value ? esc(value) : '<span class="empty">—</span>') + '</div></div>';
+  }
+  function submitWinForm(e) {
+    e.preventDefault();
+    var amount = Number(val('f-win-amount'));
+    var errEl = document.getElementById('win-form-error');
+    if (!amount || amount <= 0) {
+      errEl.innerHTML = '<p class="form-error">Enter an amount greater than 0.</p>';
+      return;
+    }
+    api('POST', '/api/leads/' + currentReportLeadId + '/wins', { amount: amount, note: val('f-win-note') }).then(function () {
+      toast('Win logged.');
+      route('report', { id: currentReportLeadId });
+    }).catch(function (err) {
+      errEl.innerHTML = '<p class="form-error">' + esc((err.details && err.details[0]) || 'Could not save.') + '</p>';
+    });
   }
 
   /* ---------------- archive ---------------- */
@@ -462,14 +523,20 @@
     }).catch(function (err) { done(errorState(err)); });
   }
   function renderArchiveMonthView(period, done) {
+    var sfx = salesmanFilter ? '&salesman_id=' + encodeURIComponent(salesmanFilter) : '';
     Promise.all([
-      api('GET', '/api/leads?period=' + encodeURIComponent(period)),
-      api('GET', '/api/lost-opportunities?period=' + encodeURIComponent(period)),
+      api('GET', '/api/leads?period=' + encodeURIComponent(period) + sfx),
+      api('GET', '/api/lost-opportunities?period=' + encodeURIComponent(period) + sfx),
+      new Promise(function (resolve) { loadTeamIfAdmin(resolve); }),
     ]).then(function (results) {
       var leads = results[0].leads;
       var lost = results[1].lostOpportunities;
       var html = '<div class="view-head"><div><p class="view-kicker">Archived · ' + esc(monthLabel(period)) + '</p><h1 class="view-title">' + esc(monthLabel(period)) + '</h1></div>' +
         '<button class="btn btn-ghost" data-nav="archive">← Back to Archive</button></div>';
+
+      if (isAdmin()) {
+        html += '<div class="toolbar">' + salesmanFilterHtml('q-salesman-archive') + '</div>';
+      }
 
       html += '<h2 class="panel-title" style="margin:24px 0 8px">Accounts</h2>';
       if (!leads.length) {
@@ -498,13 +565,18 @@
 
   /* ---------------- lost opportunities ---------------- */
   function renderLostOppsView(done) {
-    api('GET', '/api/lost-opportunities').then(function (data) {
+    var url = '/api/lost-opportunities' + (salesmanFilter ? '?salesman_id=' + encodeURIComponent(salesmanFilter) : '');
+    Promise.all([api('GET', url), new Promise(function (resolve) { loadTeamIfAdmin(resolve); })]).then(function (results) {
+      var data = results[0];
       var rows = data.lostOpportunities;
       lostOpps = rows;
       var totalLoss = rows.reduce(function (a, o) { return a + Number(o.potential_revenue_loss || 0); }, 0);
       var html = '<div class="view-head"><div><p class="view-kicker">' + rows.length + ' record' + (rows.length === 1 ? '' : 's') + ' · ' + fmtMoney(totalLoss) + ' potential revenue lost</p>' +
         '<h1 class="view-title">Lost Opportunities</h1><p class="view-sub">A running log of business that didn’t close. This list is the current month — last month is in Archive.</p></div>' +
         '<button class="btn btn-primary" id="btn-add-lost">+ Log Lost Opportunity</button></div>';
+      if (isAdmin()) {
+        html += '<div class="toolbar">' + salesmanFilterHtml('q-salesman') + '</div>';
+      }
       html += '<div id="lost-form-slot"></div>';
       if (!rows.length) {
         html += '<div class="table-wrap"><div class="empty-state"><h3>Nothing logged yet</h3></div></div>';
@@ -699,8 +771,37 @@
     var leadForm = document.getElementById('lead-form');
     if (leadForm) leadForm.addEventListener('submit', submitLeadForm);
 
+    var winForm = document.getElementById('win-form');
+    if (winForm) winForm.addEventListener('submit', submitWinForm);
+    document.querySelectorAll('[data-delete-win]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-delete-win');
+        var key = 'win-' + id;
+        if (deleteArmed !== key) {
+          deleteArmed = key;
+          btn.textContent = '✕';
+          btn.title = 'Confirm delete?';
+          setTimeout(function () { if (deleteArmed === key) deleteArmed = null; }, 4000);
+          return;
+        }
+        deleteArmed = null;
+        api('DELETE', '/api/leads/' + currentReportLeadId + '/wins/' + id).then(function () {
+          toast('Win removed.');
+          route('report', { id: currentReportLeadId });
+        }).catch(function () { toast('Could not delete.', true); });
+      });
+    });
+
     var printBtn = document.getElementById('btn-print');
     if (printBtn) printBtn.addEventListener('click', function () { window.print(); });
+
+    var exportPdfBtn = document.getElementById('btn-export-pdf');
+    if (exportPdfBtn) exportPdfBtn.addEventListener('click', function () {
+      var qs = [];
+      if (salesmanFilter) qs.push('salesman_id=' + encodeURIComponent(salesmanFilter));
+      if (tableFilter.stage) qs.push('stage=' + encodeURIComponent(tableFilter.stage));
+      window.open('/api/leads/export/pdf' + (qs.length ? '?' + qs.join('&') : ''), '_blank');
+    });
 
     var addLostBtn = document.getElementById('btn-add-lost');
     if (addLostBtn) addLostBtn.addEventListener('click', function () { openLostForm(null); });
@@ -790,6 +891,10 @@
     if (qStage) qStage.addEventListener('change', function () { tableFilter.stage = qStage.value; route('leads'); });
     var qService = document.getElementById('q-service');
     if (qService) qService.addEventListener('change', function () { tableFilter.service = qService.value; route('leads'); });
+    var qSalesman = document.getElementById('q-salesman');
+    if (qSalesman) qSalesman.addEventListener('change', function () { salesmanFilter = qSalesman.value; render(); });
+    var qSalesmanArchive = document.getElementById('q-salesman-archive');
+    if (qSalesmanArchive) qSalesmanArchive.addEventListener('change', function () { salesmanFilter = qSalesmanArchive.value; render(); });
   }
 
   function doLogin(name, password) {
