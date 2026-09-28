@@ -101,6 +101,8 @@ textarea{min-height:90px;resize:vertical}
 .form-actions{display:flex;gap:10px;margin-top:var(--sp-5);padding-top:var(--sp-5);border-top:1px solid var(--line-soft)}
 .req{color:var(--overdue)}
 .form-error{color:var(--overdue);font-size:13px;margin:-8px 0 12px}
+.hint{font-size:11.5px;color:var(--steel);margin-top:2px}
+.hint.new{color:var(--stage-negotiating);font-weight:600}
 
 .view-login{display:flex;align-items:center;justify-content:center;min-height:100vh}
 .login-panel{width:100%;max-width:380px;text-align:center;background:var(--card);border:1px solid var(--line);border-radius:var(--radius-lg);padding:var(--sp-6);box-shadow:0 1px 2px var(--shadow)}
@@ -139,6 +141,20 @@ textarea{min-height:90px;resize:vertical}
 
 .modal-overlay{position:fixed;inset:0;background:rgba(4,8,6,0.6);display:flex;align-items:center;justify-content:center;padding:var(--sp-5);z-index:80}
 .modal-panel{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-lg);padding:var(--sp-5);width:100%;max-width:360px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+
+.acct-table{width:100%;border-collapse:collapse;min-width:0}
+.acct-row{cursor:pointer}
+.acct-row:hover{background:var(--line-soft)}
+.acct-row td{padding:14px 13px;border-bottom:1px solid var(--line-soft)}
+.acct-row.expanded{background:#FBFAF2}
+.acct-chevron{display:inline-block;width:9px;height:9px;border-right:2px solid var(--steel);border-bottom:2px solid var(--steel);transform:rotate(-45deg);transition:transform .15s ease;margin-right:10px}
+.acct-row.expanded .acct-chevron{transform:rotate(45deg)}
+.acct-name{font-weight:700;font-size:14px}
+.acct-contact{color:var(--steel);font-size:11.5px;margin-top:2px}
+.acct-sub-wrap{padding:0 18px 18px 42px;background:#FBFAF2;border-bottom:1px solid var(--line-soft)}
+.acct-sub-wrap table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line-soft);border-radius:var(--radius-md);overflow:hidden}
+.acct-sub-wrap thead th{font-size:10px;padding:9px 12px}
+.acct-sub-wrap tbody td{padding:9px 12px;font-size:12.5px}
 
 @media (max-width:900px){
   .field-row{grid-template-columns:1fr}
