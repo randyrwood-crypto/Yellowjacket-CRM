@@ -20,8 +20,9 @@ const SELECT_COLS = `
   lo.notes, lo.period, lo.created_at, lo.updated_at
 `;
 
-// GET /api/lost-opportunities?period=2026-09  (defaults to the current
-// period; "all" for every period) — same rollover pattern as /api/leads.
+// GET /api/lost-opportunities?period=2026-09&salesman_id=3  (period defaults
+// to the current period, "all" for every period — same rollover pattern as
+// /api/leads; salesman_id is admin-only, for the Lost Opportunities filter).
 router.get('/', async (req, res, next) => {
   try {
     const period = req.query.period || currentPeriod();
@@ -33,6 +34,9 @@ router.get('/', async (req, res, next) => {
     }
     if (!isAdmin(req)) {
       params.push(req.session.user.id);
+      where += ` AND lo.salesman_id = $${params.length}`;
+    } else if (req.query.salesman_id) {
+      params.push(Number(req.query.salesman_id));
       where += ` AND lo.salesman_id = $${params.length}`;
     }
     const result = await pool.query(
