@@ -10,13 +10,18 @@
 
   var currentUser = null;
   var currentView = { view: 'login' };
-  var tableFilter = { q: '', stage: '', service: '' };
-  var salesmanFilter = ''; // admin-only, shared across Leads / Lost Opportunities / Archive
+  var tableFilter = { q: '' }; // Accounts search box
+  var salesmanFilter = ''; // admin-only, shared across Accounts / Lost Opportunities / Archive
   var loginMode = 'salesman';
   var loginError = '';
   var roster = [];
   var team = [];
   var lostOpps = [];
+  var expandedAccounts = {}; // account id -> bool, which accordion rows are open
+  var accountLeadsCache = {}; // account id -> leads array, cleared whenever a lead/win changes
+  var editingAccount = null; // account object being edited in the modal, or null
+  var lastAccountsList = []; // most recently fetched Accounts rows (for the edit modal to read from)
+  var lastAccountNames = []; // most recently fetched account name list (for the Add/Edit Lead hint)
 
   var app = document.getElementById('app');
   var toastEl = document.getElementById('toast');
@@ -118,7 +123,7 @@
 
     switch (currentView.view) {
       case 'dashboard': renderDashboard(done); break;
-      case 'leads': renderLeadsView(done); break;
+      case 'accounts': renderAccountsView(done); break;
       case 'form': renderFormView(currentView.id, done); break;
       case 'report': renderReportView(currentView.id, done); break;
       case 'archive': renderArchiveView(done); break;
@@ -144,7 +149,7 @@
   function renderRail() {
     var items = [
       { id: 'dashboard', label: 'Dashboard' },
-      { id: 'leads', label: 'Leads & Accounts' },
+      { id: 'accounts', label: 'Accounts' },
       { id: 'archive', label: 'Archive' },
       { id: 'lostOpps', label: 'Lost Opportunities' },
       { id: 'form', label: 'Add Lead' },
@@ -269,69 +274,149 @@
       }).join('') + '</select>';
   }
 
-  function renderLeadsView(done) {
-    var url = '/api/leads' + (salesmanFilter ? '?salesman_id=' + encodeURIComponent(salesmanFilter) : '');
+  // Accounts is the consolidated, cross-time view: one row per company, with
+  // rolled-up totals, that expands to show every lead under it. (Archive is
+  // still where past months are browsed one month at a time — see
+  // renderArchiveMonthView, unchanged.)
+  function renderAccountsView(done) {
+    var viewToken = currentView;
+    var url = '/api/accounts' + (salesmanFilter ? '?salesman_id=' + encodeURIComponent(salesmanFilter) : '');
     Promise.all([api('GET', url), new Promise(function (resolve) { loadTeamIfAdmin(resolve); })]).then(function (results) {
-      var data = results[0];
-      var leads = data.leads;
-      var html = '<div class="view-head"><div><p class="view-kicker">' + leads.length + ' account' + (leads.length === 1 ? '' : 's') + '</p>' +
-        '<h1 class="view-title">Leads &amp; Accounts</h1>' +
-        '<p class="view-sub">' + (isAdmin() ? 'Search, filter, and open any account.' : 'Search, filter, and open your accounts.') + ' This list is the current month — last month is in Archive.</p></div>' +
+      var accts = results[0].accounts;
+      lastAccountsList = accts;
+      var totalLeads = accts.reduce(function (a, x) { return a + Number(x.lead_count || 0); }, 0);
+      var totalPipeline = accts.reduce(function (a, x) { return a + Number(x.pipeline_value || 0); }, 0);
+      var totalWon = accts.reduce(function (a, x) { return a + Number(x.won_to_date || 0); }, 0);
+
+      var html = '<div class="view-head"><div><p class="view-kicker">' + accts.length + ' account' + (accts.length === 1 ? '' : 's') + ' · ' + totalLeads + ' lead' + (totalLeads === 1 ? '' : 's') + '</p>' +
+        '<h1 class="view-title">Accounts</h1>' +
+        '<p class="view-sub">Every company ' + (isAdmin() ? 'your team works' : 'you work') + ' with, in one place. Open an account to see its leads and everything won from it — leads for the same company are grouped here automatically.</p></div>' +
         '<div style="display:flex;gap:10px">' +
         (isAdmin() ? '<button class="btn btn-ghost" id="btn-export-pdf">⎙ Export PDF</button>' : '') +
         '<button class="btn btn-primary" data-nav="form">+ New Lead</button></div></div>';
 
+      html += '<div class="hl-bar">' +
+        '<div class="hl-seg"><div class="hl-label">Accounts</div><div class="hl-value">' + accts.length + '</div></div>' +
+        '<div class="hl-seg"><div class="hl-label">Pipeline Value</div><div class="hl-value">' + fmtMoney(totalPipeline) + '</div></div>' +
+        '<div class="hl-seg"><div class="hl-label">Won To Date</div><div class="hl-value" style="color:var(--stage-won)">' + fmtMoney(totalWon) + '</div></div>' +
+        '</div>';
+
       html += '<div class="toolbar">' +
-        '<div class="search"><input type="text" id="q-search" placeholder="Search company, contact, or site…" value="' + esc(tableFilter.q) + '"></div>' +
-        '<select class="filter-sel" id="q-stage"><option value="">All stages</option>' + STAGES.map(function (s) { return '<option value="' + esc(s) + '"' + (tableFilter.stage === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('') + '</select>' +
-        '<select class="filter-sel" id="q-service"><option value="">All services</option>' + SERVICE_TYPES.map(function (s) { return '<option value="' + esc(s) + '"' + (tableFilter.service === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('') + '</select>' +
+        '<div class="search"><input type="text" id="q-search" placeholder="Search account or contact…" value="' + esc(tableFilter.q) + '"></div>' +
         salesmanFilterHtml('q-salesman') +
         '</div>';
 
-      var rows = leads.filter(function (l) {
-        if (tableFilter.stage && l.stage !== tableFilter.stage) return false;
-        if (tableFilter.service && l.service_type !== tableFilter.service) return false;
-        if (tableFilter.q) {
-          var hay = [l.company, l.contact, l.site, l.lead_code].join(' ').toLowerCase();
-          if (hay.indexOf(tableFilter.q.toLowerCase()) === -1) return false;
-        }
-        return true;
+      var rows = accts.filter(function (a) {
+        if (!tableFilter.q) return true;
+        var hay = [a.name, a.contact].join(' ').toLowerCase();
+        return hay.indexOf(tableFilter.q.toLowerCase()) !== -1;
       });
 
-      if (!leads.length) {
-        html += '<div class="table-wrap"><div class="empty-state"><h3>No leads yet</h3><p>Add your first lead to start building the pipeline.</p><button class="btn btn-primary" data-nav="form">+ New Lead</button></div></div>';
+      if (!accts.length) {
+        html += '<div class="table-wrap"><div class="empty-state"><h3>No accounts yet</h3><p>Add your first lead to start building the pipeline — an account is created automatically.</p><button class="btn btn-primary" data-nav="form">+ New Lead</button></div></div>';
+        html += accountEditModalHtml();
         return done(html);
       }
       if (!rows.length) {
-        html += '<div class="table-wrap"><div class="empty-state"><h3>No matches</h3><p>Try clearing the search or filters.</p></div></div>';
+        html += '<div class="table-wrap"><div class="empty-state"><h3>No matches</h3><p>Try clearing the search.</p></div></div>';
+        html += accountEditModalHtml();
         return done(html);
       }
 
-      html += '<div class="table-wrap"><table><thead><tr>' +
-        '<th>Lead ID</th><th>Company / Site</th><th>Contact</th><th>Service Type</th><th>Stage</th><th>Deal Value</th><th>Salesman</th><th>Next Follow-Up</th><th></th>' +
-        '</tr></thead><tbody>' +
-        rows.map(function (l) {
-          var od = isOverdue(l);
-          var v = STAGE_VAR[l.stage] || '--steel';
-          var canEdit = isAdmin() || l.salesman_id === currentUser.id;
-          return '<tr style="border-left:4px solid var(' + v + ')">' +
-            '<td class="nowrap">' + esc(l.lead_code) + '</td>' +
-            '<td><div class="cell-company">' + esc(l.company || '—') + '</div><div class="cell-sub">' + esc(l.site || '') + '</div></td>' +
-            '<td>' + esc(l.contact || '—') + '<div class="cell-sub">' + esc(l.phone || '') + '</div></td>' +
-            '<td>' + esc(l.service_type || '—') + '</td>' +
-            '<td>' + stageChip(l.stage) + '</td>' +
-            '<td class="money">' + fmtMoney(l.deal_value) + '</td>' +
-            '<td>' + esc(l.salesman_name || '—') + '</td>' +
-            '<td class="nowrap" style="' + (od ? 'color:var(--overdue);font-weight:700' : '') + '">' + (l.next_follow_up ? fmtDate(l.next_follow_up) : '—') + (od ? ' ⚠' : '') + '</td>' +
-            '<td><div class="row-actions">' +
-            '<button class="icon-btn" title="View" data-open-report="' + l.id + '">⊙</button>' +
-            (canEdit ? '<button class="icon-btn" title="Edit" data-nav="form" data-edit-id="' + l.id + '">✎</button>' : '') +
-            (isAdmin() ? '<button class="icon-btn" title="Delete" data-delete-lead="' + l.id + '">✕</button>' : '') +
-            '</div></td></tr>';
-        }).join('') +
-        '</tbody></table></div>';
+      html += '<div class="table-wrap"><table class="acct-table"><thead><tr><th></th><th>Account</th><th>Primary Contact</th><th>Leads</th><th>Pipeline Value</th><th>Won To Date</th><th></th></tr></thead><tbody>';
+      rows.forEach(function (a) {
+        var isOpen = !!expandedAccounts[a.id];
+        html += '<tr class="acct-row' + (isOpen ? ' expanded' : '') + '" data-toggle-acct="' + a.id + '">' +
+          '<td style="width:24px"><span class="acct-chevron"></span></td>' +
+          '<td><div class="acct-name">' + esc(a.name) + '</div></td>' +
+          '<td>' + esc(a.contact || '—') + '<div class="acct-contact">' + esc(a.phone || '') + '</div></td>' +
+          '<td>' + a.lead_count + '</td>' +
+          '<td class="money">' + fmtMoney(a.pipeline_value) + '</td>' +
+          '<td class="money" style="color:var(--stage-won)">' + fmtMoney(a.won_to_date) + '</td>' +
+          '<td style="text-align:right"><button class="icon-btn" title="Edit account" data-edit-acct="' + a.id + '">✎</button></td>' +
+          '</tr>';
+        if (isOpen) {
+          html += '<tr><td colspan="7" style="padding:0"><div class="acct-sub-wrap" id="acct-sub-' + a.id + '">' +
+            '<div class="empty-state" style="padding:20px 0"><p style="margin:0">Loading…</p></div></div></td></tr>';
+        }
+      });
+      html += '</tbody></table></div>';
+
+      html += accountEditModalHtml();
       done(html);
+
+      // Fill in each expanded account's lead sub-table after the shell has
+      // painted, so opening many accounts at once never blocks the list.
+      rows.forEach(function (a) {
+        if (expandedAccounts[a.id]) loadAccountLeads(a.id, viewToken);
+      });
     }).catch(function (err) { done(errorState(err)); });
+  }
+
+  function loadAccountLeads(accountId, viewToken) {
+    if (accountLeadsCache[accountId]) {
+      paintAccountSubRows(accountId, accountLeadsCache[accountId]);
+      return;
+    }
+    api('GET', '/api/accounts/' + accountId + '/leads').then(function (data) {
+      accountLeadsCache[accountId] = data.leads;
+      if (currentView !== viewToken) return;
+      paintAccountSubRows(accountId, data.leads);
+    }).catch(function () {
+      if (currentView !== viewToken) return;
+      var el = document.getElementById('acct-sub-' + accountId);
+      if (el) el.innerHTML = '<div class="empty-state" style="padding:20px 0"><p style="margin:0">Could not load leads.</p></div>';
+    });
+  }
+
+  function paintAccountSubRows(accountId, rows) {
+    var el = document.getElementById('acct-sub-' + accountId);
+    if (!el) return;
+    if (!rows.length) {
+      el.innerHTML = '<div class="empty-state" style="padding:20px 0"><p style="margin:0">No leads under this account yet.</p></div>';
+      return;
+    }
+    el.innerHTML = '<table><thead><tr><th>Lead ID</th><th>Site / Lease</th><th>Service Type</th><th>Stage</th><th>Deal Value</th><th>Salesman</th><th>Next Follow-Up</th><th>Won To Date</th><th></th></tr></thead><tbody>' +
+      rows.map(function (l) {
+        var od = isOverdue(l);
+        return '<tr>' +
+          '<td class="nowrap">' + esc(l.lead_code) + '</td>' +
+          '<td>' + esc(l.site || '—') + '<div class="cell-sub">' + esc(l.county || '') + '</div></td>' +
+          '<td>' + esc(l.service_type || '—') + '</td>' +
+          '<td>' + stageChip(l.stage) + '</td>' +
+          '<td class="money">' + fmtMoney(l.deal_value) + '</td>' +
+          '<td>' + esc(l.salesman_name || '—') + '</td>' +
+          '<td class="nowrap" style="' + (od ? 'color:var(--overdue);font-weight:700' : '') + '">' + (l.next_follow_up ? fmtDate(l.next_follow_up) : '—') + (od ? ' ⚠' : '') + '</td>' +
+          '<td class="money" style="color:var(--stage-won)">' + fmtMoney(l.won_to_date) + '</td>' +
+          '<td style="text-align:right"><button class="icon-btn" title="View" data-open-report="' + l.id + '">⊙</button></td>' +
+          '</tr>';
+      }).join('') + '</tbody></table>';
+    el.querySelectorAll('[data-open-report]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        route('report', { id: btn.getAttribute('data-open-report') });
+      });
+    });
+  }
+
+  // Modal for editing an account's shared contact info (name is fixed — see
+  // routes/accounts.js for why). Uses the .modal-overlay/.modal-panel classes.
+  function accountEditModalHtml() {
+    if (!editingAccount) return '';
+    var a = editingAccount;
+    return '<div class="modal-overlay" id="acct-modal-overlay">' +
+      '<div class="modal-panel">' +
+      '<h2 class="panel-title" style="margin-bottom:4px">' + esc(a.name) + '</h2>' +
+      '<p class="view-sub" style="margin:0 0 16px">Update this account’s shared contact info — it’s used across every lead under it.</p>' +
+      '<form id="acct-edit-form">' +
+      fieldHtml('acct-contact', 'Primary Contact', a.contact) +
+      fieldHtml('acct-phone', 'Phone', a.phone) +
+      fieldHtml('acct-email', 'Email', a.email) +
+      '<div id="acct-edit-error"></div>' +
+      '<div class="form-actions" style="margin-top:var(--sp-4);padding-top:var(--sp-4)">' +
+      '<button type="submit" class="btn btn-primary">Save</button>' +
+      '<button type="button" class="btn btn-ghost" id="acct-edit-cancel">Cancel</button>' +
+      '</div></form></div></div>';
   }
 
   function stageChip(stage) {
@@ -343,19 +428,24 @@
   function renderFormView(editId, done) {
     function build(editing) {
       if (editId && !editing) {
-        return done('<div class="empty-state"><h3>Not available</h3><p>That lead could not be found, or isn\'t assigned to you.</p><button class="btn btn-ghost" data-nav="leads">Back to Leads</button></div>');
+        return done('<div class="empty-state"><h3>Not available</h3><p>That lead could not be found, or isn\'t assigned to you.</p><button class="btn btn-ghost" data-nav="accounts">Back to Accounts</button></div>');
       }
-      loadTeamIfAdmin(function () {
+      Promise.all([
+        new Promise(function (resolve) { loadTeamIfAdmin(resolve); }),
+        api('GET', '/api/accounts/names').catch(function () { return { accounts: [] }; }),
+      ]).then(function (results) {
+        lastAccountNames = results[1].accounts || [];
         var f = editing || { stage: 'New Lead' };
-        var html = '<div class="view-head"><div><p class="view-kicker">' + (editing ? 'Edit account' : 'New account') + '</p>' +
+        var html = '<div class="view-head"><div><p class="view-kicker">' + (editing ? 'Edit lead' : 'New lead') + '</p>' +
           '<h1 class="view-title">' + (editing ? 'Edit Lead' : 'Add A New Lead') + '</h1>' +
-          '<p class="view-sub">' + (editing ? 'Update this account and save — it updates everyone’s shared list immediately.' : 'Fill in what you know and save — it’s added to the shared list right away.') + '</p></div></div>';
+          '<p class="view-sub">' + (editing ? 'Update this lead and save — it updates everyone’s shared list immediately.' : 'Type an existing account name to attach this lead to it, or a new name to create that account on the spot.') + '</p></div></div>';
 
         html += '<div class="form-wrap panel"><form id="lead-form">';
         if (editing) html += '<input type="hidden" id="f-id" value="' + editing.id + '">';
-        html += fieldHtml('company', 'Company / Account Name', f.company, true);
-        html += '<div class="field-row">' + fieldHtml('contact', 'Primary Contact', f.contact) + fieldHtml('phone', 'Phone', f.phone) + '</div>';
-        html += fieldHtml('email', 'Email', f.email);
+        html += '<div class="field"><label>Account Name <span class="req">*</span></label>' +
+          '<input type="text" id="f-account" list="account-list" value="' + esc(f.company || '') + '" placeholder="Start typing a company name…" autocomplete="off">' +
+          '<datalist id="account-list">' + lastAccountNames.map(function (a) { return '<option value="' + esc(a.name) + '">'; }).join('') + '</datalist>' +
+          '<div class="hint" id="account-hint">Pick an existing account, or type a new company name to create one.</div></div>';
         html += '<div class="field-row">' + fieldHtml('site', 'Lease / Well / Site Name', f.site) + fieldHtml('county', 'County / Basin', f.county) + '</div>';
         html += fieldHtml('location', 'Location / Address', f.location);
         html += '<div class="field-row">' + selectHtml('service_type', 'Service Type Needed', f.service_type, SERVICE_TYPES) + selectHtml('stage', 'Pipeline Stage', f.stage, STAGES) + '</div>';
@@ -371,7 +461,7 @@
         html += '<div class="field"><label>Notes</label><textarea id="f-notes">' + esc(f.notes || '') + '</textarea></div>';
         html += '<div id="form-error"></div>';
         html += '<div class="form-actions"><button type="submit" class="btn btn-primary">' + (editing ? 'Save Changes' : '✓ Save Lead') + '</button>' +
-          '<button type="button" class="btn btn-ghost" data-nav="' + (editing ? 'leads' : 'dashboard') + '">Cancel</button></div>';
+          '<button type="button" class="btn btn-ghost" data-nav="' + (editing ? 'accounts' : 'dashboard') + '">Cancel</button></div>';
         html += '</form></div>';
         done(html);
       });
@@ -406,14 +496,14 @@
   function submitLeadForm(e) {
     e.preventDefault();
     var idEl = document.getElementById('f-id');
-    var company = val('f-company');
+    var accountName = val('f-account');
     var errEl = document.getElementById('form-error');
-    if (!company) {
-      errEl.innerHTML = '<p class="form-error">Company / Account Name is required.</p>';
+    if (!accountName) {
+      errEl.innerHTML = '<p class="form-error">Account Name is required.</p>';
       return;
     }
     var body = {
-      company: company, contact: val('f-contact'), phone: val('f-phone'), email: val('f-email'),
+      account_name: accountName,
       site: val('f-site'), county: val('f-county'), location: val('f-location'),
       service_type: val('f-service_type'), stage: val('f-stage') || 'New Lead',
       deal_value: Number(val('f-deal_value')) || 0,
@@ -425,6 +515,7 @@
     var req = idEl ? api('PUT', '/api/leads/' + idEl.value, body) : api('POST', '/api/leads', body);
     req.then(function (data) {
       toast(idEl ? 'Lead updated.' : 'Lead saved.');
+      accountLeadsCache = {}; // the lead's account (and possibly a brand-new account) just changed
       route('report', { id: data.lead.id });
     }).catch(function (err) {
       errEl.innerHTML = '<p class="form-error">' + esc((err.details && err.details[0]) || 'Could not save — please try again.') + '</p>';
@@ -442,10 +533,10 @@
       var canEdit = isAdmin() || l.salesman_id === currentUser.id;
       var od = isOverdue(l);
       var html = '<div class="report-toolbar">' +
-        '<button class="btn btn-ghost" data-nav="leads">← Back to Leads</button>' +
+        '<button class="btn btn-ghost" data-nav="accounts">← Back to Accounts</button>' +
         '<div style="display:flex;gap:10px">' +
         (canEdit ? '<button class="btn btn-ghost" data-nav="form" data-edit-id="' + l.id + '">Edit</button>' : '') +
-        (isAdmin() ? '<button class="btn btn-ghost" data-delete-lead="' + l.id + '" data-after="leads">Delete</button>' : '') +
+        (isAdmin() ? '<button class="btn btn-ghost" data-delete-lead="' + l.id + '" data-after="accounts">Delete</button>' : '') +
         '<button class="btn btn-primary" id="btn-print">⎙ Print</button>' +
         '</div></div>';
       html += '<div class="report">' +
@@ -498,6 +589,7 @@
     }
     api('POST', '/api/leads/' + currentReportLeadId + '/wins', { amount: amount, note: val('f-win-note') }).then(function () {
       toast('Win logged.');
+      accountLeadsCache = {};
       route('report', { id: currentReportLeadId });
     }).catch(function (err) {
       errEl.innerHTML = '<p class="form-error">' + esc((err.details && err.details[0]) || 'Could not save.') + '</p>';
@@ -787,6 +879,7 @@
         deleteArmed = null;
         api('DELETE', '/api/leads/' + currentReportLeadId + '/wins/' + id).then(function () {
           toast('Win removed.');
+          accountLeadsCache = {};
           route('report', { id: currentReportLeadId });
         }).catch(function () { toast('Could not delete.', true); });
       });
@@ -799,127 +892,63 @@
     if (exportPdfBtn) exportPdfBtn.addEventListener('click', function () {
       var qs = [];
       if (salesmanFilter) qs.push('salesman_id=' + encodeURIComponent(salesmanFilter));
-      if (tableFilter.stage) qs.push('stage=' + encodeURIComponent(tableFilter.stage));
       window.open('/api/leads/export/pdf' + (qs.length ? '?' + qs.join('&') : ''), '_blank');
     });
 
-    var addLostBtn = document.getElementById('btn-add-lost');
-    if (addLostBtn) addLostBtn.addEventListener('click', function () { openLostForm(null); });
-
-    document.querySelectorAll('[data-edit-lost]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var id = btn.getAttribute('data-edit-lost');
-        var record = null;
-        for (var i = 0; i < lostOpps.length; i++) { if (String(lostOpps[i].id) === String(id)) { record = lostOpps[i]; break; } }
-        openLostForm(record);
+    document.querySelectorAll('[data-toggle-acct]').forEach(function (row) {
+      row.addEventListener('click', function () {
+        var id = row.getAttribute('data-toggle-acct');
+        expandedAccounts[id] = !expandedAccounts[id];
+        render();
       });
     });
-
-    document.querySelectorAll('[data-delete-lead]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var id = btn.getAttribute('data-delete-lead');
-        var key = 'lead-' + id;
-        if (deleteArmed !== key) {
-          deleteArmed = key;
-          btn.textContent = '✕ Confirm?';
-          setTimeout(function () { if (deleteArmed === key) deleteArmed = null; }, 4000);
-          return;
+    document.querySelectorAll('[data-edit-acct]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var id = btn.getAttribute('data-edit-acct');
+        var acct = null;
+        for (var i = 0; i < lastAccountsList.length; i++) {
+          if (String(lastAccountsList[i].id) === String(id)) { acct = lastAccountsList[i]; break; }
         }
-        deleteArmed = null;
-        api('DELETE', '/api/leads/' + id).then(function () {
-          toast('Lead deleted.');
-          var after = btn.getAttribute('data-after');
-          route(after || 'leads');
-        }).catch(function () { toast('Could not delete.', true); });
+        if (!acct) return;
+        editingAccount = { id: acct.id, name: acct.name, contact: acct.contact, phone: acct.phone, email: acct.email };
+        render();
       });
     });
-    document.querySelectorAll('[data-delete-lost]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var id = btn.getAttribute('data-delete-lost');
-        var key = 'lost-' + id;
-        if (deleteArmed !== key) {
-          deleteArmed = key;
-          btn.textContent = '✕';
-          btn.title = 'Confirm delete?';
-          setTimeout(function () { if (deleteArmed === key) deleteArmed = null; }, 4000);
-          return;
-        }
-        deleteArmed = null;
-        api('DELETE', '/api/lost-opportunities/' + id).then(function () { toast('Removed.'); route('lostOpps'); }).catch(function () { toast('Could not delete.', true); });
-      });
+    var acctOverlay = document.getElementById('acct-modal-overlay');
+    if (acctOverlay) acctOverlay.addEventListener('click', function (e) {
+      if (e.target === acctOverlay) { editingAccount = null; render(); }
     });
-
-    var addUserForm = document.getElementById('add-user-form');
-    if (addUserForm) addUserForm.addEventListener('submit', function (e) {
+    var acctEditCancel = document.getElementById('acct-edit-cancel');
+    if (acctEditCancel) acctEditCancel.addEventListener('click', function () { editingAccount = null; render(); });
+    var acctEditForm = document.getElementById('acct-edit-form');
+    if (acctEditForm) acctEditForm.addEventListener('submit', function (e) {
       e.preventDefault();
-      var errEl = document.getElementById('add-user-error');
-      api('POST', '/api/team', { name: val('f-nu-name'), password: val('f-nu-pass'), role: val('f-nu-role') }).then(function () {
-        toast('Team member added.');
-        route('team');
+      var errEl = document.getElementById('acct-edit-error');
+      api('PUT', '/api/accounts/' + editingAccount.id, {
+        contact: val('f-acct-contact'), phone: val('f-acct-phone'), email: val('f-acct-email'),
+      }).then(function () {
+        toast('Account updated.');
+        editingAccount = null;
+        render();
       }).catch(function (err) {
-        errEl.innerHTML = '<p class="form-error">' + esc((err.details && err.details[0]) || (err.code === 'name_taken' ? 'That name is already in use.' : 'Could not add.')) + '</p>';
-      });
-    });
-    document.querySelectorAll('[data-reset-pw]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var id = btn.getAttribute('data-reset-pw');
-        var pw = window.prompt('New temporary password for this person (min 8 characters):');
-        if (!pw) return;
-        api('PUT', '/api/team/' + id + '/password', { password: pw }).then(function () { toast('Password reset.'); }).catch(function () { toast('Could not reset password (min 8 characters).', true); });
-      });
-    });
-    document.querySelectorAll('[data-remove-user]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var id = btn.getAttribute('data-remove-user');
-        var key = 'user-' + id;
-        if (deleteArmed !== key) {
-          deleteArmed = key;
-          btn.textContent = 'Confirm?';
-          setTimeout(function () { if (deleteArmed === key) deleteArmed = null; }, 4000);
-          return;
-        }
-        deleteArmed = null;
-        api('DELETE', '/api/team/' + id).then(function () { toast('Removed.'); route('team'); }).catch(function (err) {
-          toast(err.message || 'Could not remove — they may have records on file.', true);
-        });
+        errEl.innerHTML = '<p class="form-error">' + esc((err.details && err.details[0]) || (err.code === 'not_yours' ? 'You can only edit accounts you have a lead under.' : 'Could not save.')) + '</p>';
       });
     });
 
-    var qs = document.getElementById('q-search');
-    if (qs) qs.addEventListener('input', function () { tableFilter.q = qs.value; route('leads'); });
-    var qStage = document.getElementById('q-stage');
-    if (qStage) qStage.addEventListener('change', function () { tableFilter.stage = qStage.value; route('leads'); });
-    var qService = document.getElementById('q-service');
-    if (qService) qService.addEventListener('change', function () { tableFilter.service = qService.value; route('leads'); });
-    var qSalesman = document.getElementById('q-salesman');
-    if (qSalesman) qSalesman.addEventListener('change', function () { salesmanFilter = qSalesman.value; render(); });
-    var qSalesmanArchive = document.getElementById('q-salesman-archive');
-    if (qSalesmanArchive) qSalesmanArchive.addEventListener('change', function () { salesmanFilter = qSalesmanArchive.value; render(); });
-  }
-
-  function doLogin(name, password) {
-    if (!name) { loginError = 'Select your name.'; render(); return; }
-    api('POST', '/api/auth/login', { name: name, password: password }).then(function (data) {
-      currentUser = data.user;
-      loginError = '';
-      route('dashboard');
-    }).catch(function () {
-      loginError = 'Incorrect name or password.';
-      render();
-    });
-  }
-
-  /* ---------------- boot ---------------- */
-  function boot() {
-    api('GET', '/api/auth/me').then(function (data) {
-      currentUser = data.user;
-      if (currentUser) {
-        route('dashboard');
-      } else {
-        loadRoster(function () { render(); });
+    var acctField = document.getElementById('f-account');
+    if (acctField) acctField.addEventListener('input', function () {
+      var hint = document.getElementById('account-hint');
+      if (!hint) return;
+      var v = acctField.value.trim();
+      if (!v) {
+        hint.textContent = 'Pick an existing account, or type a new company name to create one.';
+        hint.className = 'hint';
+        return;
       }
-    }).catch(function () { loadRoster(function () { render(); }); });
-  }
-
-  boot();
-})();
+      var match = lastAccountNames.filter(function (a) { return a.name.toLowerCase() === v.toLowerCase(); })[0];
+      if (match) {
+        hint.textContent = 'Matches existing account — this lead will be added under ' + match.name + '.';
+        hint.className = 'hint';
+      } else {
+        hint.textContent = 'New account "' + v + '" will be created.';
