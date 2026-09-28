@@ -9,6 +9,7 @@ const rateLimit = require('express-rate-limit');
 const pool = require('./db/pool');
 const authRoutes = require('./routes/auth');
 const leadsRoutes = require('./routes/leads');
+const accountsRoutes = require('./routes/accounts');
 const lostOppRoutes = require('./routes/lostOpportunities');
 const teamRoutes = require('./routes/team');
 const statsRoutes = require('./routes/stats');
@@ -67,6 +68,7 @@ app.use('/api/auth/login', loginLimiter);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/leads', leadsRoutes);
+app.use('/api/accounts', accountsRoutes);
 app.use('/api/lost-opportunities', lostOppRoutes);
 app.use('/api/team', teamRoutes);
 app.use('/api/stats', statsRoutes);
