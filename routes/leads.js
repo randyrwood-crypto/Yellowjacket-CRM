@@ -28,16 +28,43 @@ function monthLabelServer(period) {
   return d.toLocaleString('en-US', { month: 'long', year: 'numeric' });
 }
 
-// Row shape sent to the client; salesman_name is joined in, won_to_date is
-// the running sum of everything logged in lead_wins for this lead so far
-// (any period), independent of the lead's current stage.
+// Finds an account by exact (case-insensitive) name, or creates one. Used
+// by both create and edit, so a lead can be attached to an existing
+// account by typing its name, or spin up a brand-new account on the spot.
+// Race-safe: two people creating "Acme" at the same instant both land on
+// the same account row, via the UNIQUE(name) constraint + ON CONFLICT.
+async function resolveAccount(name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) return null;
+  const existing = await pool.query(`SELECT id, name FROM accounts WHERE lower(name) = lower($1)`, [trimmed]);
+  if (existing.rows[0]) return existing.rows[0];
+  const inserted = await pool.query(
+    `INSERT INTO accounts (name) VALUES ($1) ON CONFLICT (name) DO NOTHING RETURNING id, name`,
+    [trimmed]
+  );
+  if (inserted.rows[0]) return inserted.rows[0];
+  const retry = await pool.query(`SELECT id, name FROM accounts WHERE lower(name) = lower($1)`, [trimmed]);
+  return retry.rows[0] || null;
+}
+
+// Row shape sent to the client. company/contact/phone/email are read
+// through the joined account (a lead's own copies of those columns are
+// kept only as an unused historical snapshot — see db/schema.sql).
+// won_to_date is the running sum of everything logged in lead_wins for
+// this lead so far (any period), independent of the lead's current stage.
 const SELECT_COLS = `
-  leads.id, leads.lead_code, leads.company, leads.contact, leads.phone, leads.email,
+  leads.id, leads.lead_code, leads.account_id,
+  accounts.name AS company, accounts.contact, accounts.phone, accounts.email,
   leads.site, leads.county, leads.location, leads.service_type, leads.stage,
   leads.deal_value, leads.salesman_id, users.name AS salesman_name,
   leads.last_contact, leads.next_follow_up, leads.notes, leads.period,
   leads.created_at, leads.updated_at,
   COALESCE((SELECT sum(amount) FROM lead_wins WHERE lead_wins.lead_id = leads.id), 0) AS won_to_date
+`;
+const FROM_JOIN = `
+  FROM leads
+  JOIN users ON users.id = leads.salesman_id
+  LEFT JOIN accounts ON accounts.id = leads.account_id
 `;
 
 // Builds the shared WHERE clause for the list + PDF-export endpoints:
@@ -69,8 +96,7 @@ router.get('/', async (req, res, next) => {
   try {
     const { period, params, where } = buildListFilter(req);
     const result = await pool.query(
-      `SELECT ${SELECT_COLS} FROM leads JOIN users ON users.id = leads.salesman_id
-       WHERE ${where} ORDER BY leads.created_at DESC`,
+      `SELECT ${SELECT_COLS} ${FROM_JOIN} WHERE ${where} ORDER BY leads.created_at DESC`,
       params
     );
     res.json({ leads: result.rows, currentPeriod: currentPeriod() });
@@ -106,8 +132,7 @@ router.get('/export/pdf', async (req, res, next) => {
     if (!isAdmin(req)) return res.status(403).json({ error: 'admin_required' });
     const { period, params, where } = buildListFilter(req);
     const result = await pool.query(
-      `SELECT ${SELECT_COLS} FROM leads JOIN users ON users.id = leads.salesman_id
-       WHERE ${where} ORDER BY leads.company ASC`,
+      `SELECT ${SELECT_COLS} ${FROM_JOIN} WHERE ${where} ORDER BY accounts.name ASC`,
       params
     );
     const leads = result.rows;
@@ -119,7 +144,7 @@ router.get('/export/pdf', async (req, res, next) => {
 
     const cols = [
       { key: 'lead_code', label: 'Lead ID', width: 55 },
-      { key: 'company', label: 'Company', width: 170 },
+      { key: 'company', label: 'Account', width: 170 },
       { key: 'stage', label: 'Stage', width: 85 },
       { key: 'deal_value', label: 'Deal Value', width: 85 },
       { key: 'salesman_name', label: 'Salesman', width: 110 },
@@ -198,7 +223,7 @@ router.get('/export/pdf', async (req, res, next) => {
 
 async function getLeadOr404(req, res) {
   const result = await pool.query(
-    `SELECT ${SELECT_COLS} FROM leads JOIN users ON users.id = leads.salesman_id WHERE leads.id = $1`,
+    `SELECT ${SELECT_COLS} ${FROM_JOIN} WHERE leads.id = $1`,
     [req.params.id]
   );
   const lead = result.rows[0];
@@ -285,20 +310,27 @@ router.delete('/:id/wins/:winId', async (req, res, next) => {
 
 function validateBody(body) {
   const errors = [];
-  if (!body.company || !String(body.company).trim()) errors.push('Company is required.');
+  if (!body.account_name || !String(body.account_name).trim()) errors.push('Account name is required.');
   if (body.stage && !STAGES.includes(body.stage)) errors.push('Invalid stage.');
   return errors;
 }
 
 // POST /api/leads — create. Salesmen are always tagged with their own id,
 // regardless of what (if anything) is sent for salesman_id — enforced here,
-// not just hidden in the UI. last_contact is always stamped to today: the
-// moment a lead is touched (created or, below, edited) IS the contact.
+// not just hidden in the UI. account_name matches an existing account
+// (case-insensitively) or creates a new one on the spot. last_contact is
+// always stamped to today: the moment a lead is touched (created or,
+// below, edited) IS the contact. `company` is still written too, only as
+// the historical snapshot column described in db/schema.sql — the app
+// never reads it back.
 router.post('/', async (req, res, next) => {
   try {
     const body = req.body || {};
     const errors = validateBody(body);
     if (errors.length) return res.status(400).json({ error: 'validation', details: errors });
+
+    const account = await resolveAccount(body.account_name);
+    if (!account) return res.status(400).json({ error: 'validation', details: ['Account name is required.'] });
 
     let salesmanId = req.session.user.id;
     if (isAdmin(req) && body.salesman_id) {
@@ -310,13 +342,13 @@ router.post('/', async (req, res, next) => {
 
     const result = await pool.query(
       `INSERT INTO leads
-        (lead_code, company, contact, phone, email, site, county, location,
+        (lead_code, company, account_id, site, county, location,
          service_type, stage, deal_value, salesman_id, last_contact, next_follow_up,
          notes, period)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        RETURNING id`,
       [
-        leadCode, body.company, body.contact || '', body.phone || '', body.email || '',
+        leadCode, account.name, account.id,
         body.site || '', body.county || '', body.location || '', body.service_type || '',
         body.stage || 'New Lead', Number(body.deal_value) || 0, salesmanId,
         todayISODate(), body.next_follow_up || null, body.notes || '',
@@ -333,8 +365,10 @@ router.post('/', async (req, res, next) => {
 
 // PUT /api/leads/:id — update. Salesmen may only edit their own lead, and
 // may never change who it's assigned to; admins may edit anything,
-// including reassigning the salesman. Every save re-stamps last_contact to
-// today, same as creating one — touching the lead at all counts as contact.
+// including reassigning the salesman. account_name can move the lead to a
+// different (or brand-new) account, same matching rules as create. Every
+// save re-stamps last_contact to today, same as creating one — touching
+// the lead at all counts as contact.
 router.put('/:id', async (req, res, next) => {
   try {
     const existing = await getLeadOr404(req, res);
@@ -347,6 +381,9 @@ router.put('/:id', async (req, res, next) => {
     const errors = validateBody(body);
     if (errors.length) return res.status(400).json({ error: 'validation', details: errors });
 
+    const account = await resolveAccount(body.account_name);
+    if (!account) return res.status(400).json({ error: 'validation', details: ['Account name is required.'] });
+
     let salesmanId = existing.salesman_id;
     if (isAdmin(req) && body.salesman_id) {
       salesmanId = Number(body.salesman_id);
@@ -354,13 +391,12 @@ router.put('/:id', async (req, res, next) => {
 
     await pool.query(
       `UPDATE leads SET
-        company=$1, contact=$2, phone=$3, email=$4, site=$5, county=$6, location=$7,
-        service_type=$8, stage=$9, deal_value=$10, salesman_id=$11,
-        last_contact=$12, next_follow_up=$13, notes=$14, updated_at=now()
-       WHERE id=$15`,
+        company=$1, account_id=$2, site=$3, county=$4, location=$5,
+        service_type=$6, stage=$7, deal_value=$8, salesman_id=$9,
+        last_contact=$10, next_follow_up=$11, notes=$12, updated_at=now()
+       WHERE id=$13`,
       [
-        body.company, body.contact || '', body.phone || '', body.email || '',
-        body.site || '', body.county || '', body.location || '', body.service_type || '',
+        account.name, account.id, body.site || '', body.county || '', body.location || '', body.service_type || '',
         body.stage || 'New Lead', Number(body.deal_value) || 0, salesmanId,
         todayISODate(), body.next_follow_up || null, body.notes || '',
         req.params.id,
