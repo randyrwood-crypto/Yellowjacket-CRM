@@ -83,7 +83,8 @@ router.get('/:id/leads', async (req, res, next) => {
       scope = `leads.salesman_id = $${params.length}`;
     }
     const result = await pool.query(
-      `SELECT leads.id, leads.lead_code, leads.site, leads.county, leads.location,
+      `SELECT leads.id, leads.lead_code, leads.contact, leads.phone, leads.email,
+         leads.site, leads.county, leads.location,
          leads.service_type, leads.stage, leads.deal_value, leads.salesman_id,
          users.name AS salesman_name, leads.last_contact, leads.next_follow_up,
          leads.notes, leads.period, leads.created_at, leads.updated_at,
