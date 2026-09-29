@@ -47,14 +47,19 @@ async function resolveAccount(name) {
   return retry.rows[0] || null;
 }
 
-// Row shape sent to the client. company/contact/phone/email are read
-// through the joined account (a lead's own copies of those columns are
-// kept only as an unused historical snapshot — see db/schema.sql).
+// Row shape sent to the client. company is read through the joined account
+// (the account is the shared record a company's leads are grouped under —
+// see db/schema.sql), but contact/phone/email are the LEAD's own columns:
+// the same company can have several different people across different
+// leads/opportunities, so each lead keeps its own contact rather than
+// inheriting the account's. The account also has its own contact/phone/
+// email (see routes/accounts.js) used as that company's primary contact on
+// the Accounts page.
 // won_to_date is the running sum of everything logged in lead_wins for
 // this lead so far (any period), independent of the lead's current stage.
 const SELECT_COLS = `
   leads.id, leads.lead_code, leads.account_id,
-  accounts.name AS company, accounts.contact, accounts.phone, accounts.email,
+  accounts.name AS company, leads.contact, leads.phone, leads.email,
   leads.site, leads.county, leads.location, leads.service_type, leads.stage,
   leads.deal_value, leads.salesman_id, users.name AS salesman_name,
   leads.last_contact, leads.next_follow_up, leads.notes, leads.period,
@@ -322,7 +327,8 @@ function validateBody(body) {
 // always stamped to today: the moment a lead is touched (created or,
 // below, edited) IS the contact. `company` is still written too, only as
 // the historical snapshot column described in db/schema.sql — the app
-// never reads it back.
+// never reads it back. contact/phone/email belong to THIS lead (this
+// opportunity's point of contact at the account), not the account itself.
 router.post('/', async (req, res, next) => {
   try {
     const body = req.body || {};
@@ -342,13 +348,14 @@ router.post('/', async (req, res, next) => {
 
     const result = await pool.query(
       `INSERT INTO leads
-        (lead_code, company, account_id, site, county, location,
+        (lead_code, company, account_id, contact, phone, email, site, county, location,
          service_type, stage, deal_value, salesman_id, last_contact, next_follow_up,
          notes, period)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
        RETURNING id`,
       [
         leadCode, account.name, account.id,
+        body.contact || '', body.phone || '', body.email || '',
         body.site || '', body.county || '', body.location || '', body.service_type || '',
         body.stage || 'New Lead', Number(body.deal_value) || 0, salesmanId,
         todayISODate(), body.next_follow_up || null, body.notes || '',
@@ -391,12 +398,13 @@ router.put('/:id', async (req, res, next) => {
 
     await pool.query(
       `UPDATE leads SET
-        company=$1, account_id=$2, site=$3, county=$4, location=$5,
-        service_type=$6, stage=$7, deal_value=$8, salesman_id=$9,
-        last_contact=$10, next_follow_up=$11, notes=$12, updated_at=now()
-       WHERE id=$13`,
+        company=$1, account_id=$2, contact=$3, phone=$4, email=$5, site=$6, county=$7, location=$8,
+        service_type=$9, stage=$10, deal_value=$11, salesman_id=$12,
+        last_contact=$13, next_follow_up=$14, notes=$15, updated_at=now()
+       WHERE id=$16`,
       [
-        account.name, account.id, body.site || '', body.county || '', body.location || '', body.service_type || '',
+        account.name, account.id, body.contact || '', body.phone || '', body.email || '',
+        body.site || '', body.county || '', body.location || '', body.service_type || '',
         body.stage || 'New Lead', Number(body.deal_value) || 0, salesmanId,
         todayISODate(), body.next_follow_up || null, body.notes || '',
         req.params.id,
