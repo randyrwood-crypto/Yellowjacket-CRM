@@ -376,11 +376,12 @@
       el.innerHTML = '<div class="empty-state" style="padding:20px 0"><p style="margin:0">No leads under this account yet.</p></div>';
       return;
     }
-    el.innerHTML = '<table><thead><tr><th>Lead ID</th><th>Site / Lease</th><th>Service Type</th><th>Stage</th><th>Deal Value</th><th>Salesman</th><th>Next Follow-Up</th><th>Won To Date</th><th></th></tr></thead><tbody>' +
+    el.innerHTML = '<table><thead><tr><th>Lead ID</th><th>Contact</th><th>Site / Lease</th><th>Service Type</th><th>Stage</th><th>Deal Value</th><th>Salesman</th><th>Next Follow-Up</th><th>Won To Date</th><th></th></tr></thead><tbody>' +
       rows.map(function (l) {
         var od = isOverdue(l);
         return '<tr>' +
           '<td class="nowrap">' + esc(l.lead_code) + '</td>' +
+          '<td>' + esc(l.contact || '—') + '<div class="cell-sub">' + esc(l.phone || '') + '</div></td>' +
           '<td>' + esc(l.site || '—') + '<div class="cell-sub">' + esc(l.county || '') + '</div></td>' +
           '<td>' + esc(l.service_type || '—') + '</td>' +
           '<td>' + stageChip(l.stage) + '</td>' +
@@ -399,15 +400,19 @@
     });
   }
 
-  // Modal for editing an account's shared contact info (name is fixed — see
-  // routes/accounts.js for why). Uses the .modal-overlay/.modal-panel classes.
+  // Modal for editing an account's PRIMARY contact info (name is fixed —
+  // see routes/accounts.js for why). This is the company's main/default
+  // contact shown on the Accounts page; it's separate from each lead's own
+  // Contact/Phone/Email, since the same company often has different people
+  // tied to different opportunities. Uses the .modal-overlay/.modal-panel
+  // classes.
   function accountEditModalHtml() {
     if (!editingAccount) return '';
     var a = editingAccount;
     return '<div class="modal-overlay" id="acct-modal-overlay">' +
       '<div class="modal-panel">' +
       '<h2 class="panel-title" style="margin-bottom:4px">' + esc(a.name) + '</h2>' +
-      '<p class="view-sub" style="margin:0 0 16px">Update this account’s shared contact info — it’s used across every lead under it.</p>' +
+      '<p class="view-sub" style="margin:0 0 16px">Update this account’s primary contact info. Each lead under this account can also have its own contact — edit a lead to set that.</p>' +
       '<form id="acct-edit-form">' +
       fieldHtml('acct-contact', 'Primary Contact', a.contact) +
       fieldHtml('acct-phone', 'Phone', a.phone) +
@@ -446,6 +451,8 @@
           '<input type="text" id="f-account" list="account-list" value="' + esc(f.company || '') + '" placeholder="Start typing a company name…" autocomplete="off">' +
           '<datalist id="account-list">' + lastAccountNames.map(function (a) { return '<option value="' + esc(a.name) + '">'; }).join('') + '</datalist>' +
           '<div class="hint" id="account-hint">Pick an existing account, or type a new company name to create one.</div></div>';
+        html += '<div class="field-row">' + fieldHtml('contact', 'Contact Name', f.contact) + fieldHtml('phone', 'Phone', f.phone) + '</div>';
+        html += fieldHtml('email', 'Email', f.email);
         html += '<div class="field-row">' + fieldHtml('site', 'Lease / Well / Site Name', f.site) + fieldHtml('county', 'County / Basin', f.county) + '</div>';
         html += fieldHtml('location', 'Location / Address', f.location);
         html += '<div class="field-row">' + selectHtml('service_type', 'Service Type Needed', f.service_type, SERVICE_TYPES) + selectHtml('stage', 'Pipeline Stage', f.stage, STAGES) + '</div>';
@@ -504,6 +511,7 @@
     }
     var body = {
       account_name: accountName,
+      contact: val('f-contact'), phone: val('f-phone'), email: val('f-email'),
       site: val('f-site'), county: val('f-county'), location: val('f-location'),
       service_type: val('f-service_type'), stage: val('f-stage') || 'New Lead',
       deal_value: Number(val('f-deal_value')) || 0,
@@ -546,7 +554,7 @@
         '<span class="chip" style="color:var(--stage-won);border-color:var(--stage-won)">' + fmtMoney(l.won_to_date) + ' won to date</span>' +
         (od ? '<span class="chip" style="color:var(--overdue);border-color:var(--overdue)">Follow-up overdue</span>' : '') + '</div>' +
         '<div class="report-grid">' +
-        rg('Primary Contact', l.contact) + rg('Phone', l.phone) + rg('Email', l.email) + rg('Salesman', l.salesman_name) +
+        rg('Contact', l.contact) + rg('Phone', l.phone) + rg('Email', l.email) + rg('Salesman', l.salesman_name) +
         rg('Lease / Well / Site', l.site) + rg('County / Basin', l.county) + rg('Location / Address', l.location) + rg('Service Type', l.service_type) +
         rg('Last Contact', l.last_contact ? fmtDate(l.last_contact) : '') + rg('Next Follow-Up', l.next_follow_up ? fmtDate(l.next_follow_up) : '') +
         '</div>' +
