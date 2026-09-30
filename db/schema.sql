@@ -73,6 +73,47 @@ UPDATE leads SET account_id = accounts.id
 FROM accounts
 WHERE accounts.name = leads.company AND leads.account_id IS NULL;
 
+-- Assignments: an admin-directed prospecting task — "go after this target
+-- account" — with an optional target date, notes on potential contacts,
+-- and free-form notes on what's needed. account_id resolves through the
+-- same accounts table leads use (match-or-create by name), so a target can
+-- be a brand-new prospect (the account is created on the spot) or an
+-- existing account the admin wants worked further.
+CREATE SEQUENCE IF NOT EXISTS assignment_code_seq START 1;
+
+CREATE TABLE IF NOT EXISTS assignments (
+  id               SERIAL PRIMARY KEY,
+  assignment_code  TEXT NOT NULL UNIQUE,           -- e.g. AS-0001
+  account_id       INTEGER NOT NULL REFERENCES accounts(id),
+  account_name     TEXT NOT NULL,                  -- snapshot at assignment time
+  target_date      DATE,
+  contact_info     TEXT DEFAULT '',                 -- admin's notes on potential contacts
+  notes            TEXT DEFAULT '',                 -- admin's free-form "what's needed" notes
+  salesman_id      INTEGER NOT NULL REFERENCES users(id),
+  assigned_by      INTEGER NOT NULL REFERENCES users(id),
+  status           TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','responded')),
+  response_text    TEXT DEFAULT '',
+  responded_at     TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_assignments_salesman ON assignments(salesman_id);
+CREATE INDEX IF NOT EXISTS idx_assignments_account ON assignments(account_id);
+
+-- Notifications: lightweight in-app alerts for the bell icon in the rail.
+-- Deliberately NOT a read/unread flag — see routes/notifications.js — a
+-- notification is deleted the moment it's fetched for viewing, which is
+-- what makes it "disappear" once opened, as requested.
+CREATE TABLE IF NOT EXISTS notifications (
+  id            SERIAL PRIMARY KEY,
+  user_id       INTEGER NOT NULL REFERENCES users(id),
+  type          TEXT NOT NULL,                      -- 'assignment_new' | 'assignment_response'
+  assignment_id INTEGER REFERENCES assignments(id) ON DELETE CASCADE,
+  message       TEXT NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
+
 CREATE TABLE IF NOT EXISTS lost_opportunities (
   id                      SERIAL PRIMARY KEY,
   lost_code               TEXT NOT NULL UNIQUE,    -- e.g. LO-0001
