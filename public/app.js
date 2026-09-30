@@ -22,6 +22,11 @@
   var editingAccount = null; // account object being edited in the modal, or null
   var lastAccountsList = []; // most recently fetched Accounts rows (for the edit modal to read from)
   var lastAccountNames = []; // most recently fetched account name list (for the Add/Edit Lead hint)
+  var lastAssignmentsList = []; // most recently fetched Assigned rows (for the edit form to read from)
+  var notifications = []; // the most recently opened batch of notifications (deleted server-side on fetch)
+  var notifCount = 0; // badge count, kept current by pollNotifCount()
+  var notifPanelOpen = false;
+  var notifPollTimer = null;
 
   var app = document.getElementById('app');
   var toastEl = document.getElementById('toast');
@@ -47,6 +52,16 @@
   }
   function todayISO() {
     return new Date().toISOString().slice(0, 10);
+  }
+  function fmtDateTime(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    var h = d.getHours();
+    var ampm = h >= 12 ? 'PM' : 'AM';
+    var h12 = h % 12 || 12;
+    var m = String(d.getMinutes()).padStart(2, '0');
+    return (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear() + ' ' + h12 + ':' + m + ' ' + ampm;
   }
   function isOverdue(l) {
     if (!l.next_follow_up) return false;
@@ -130,6 +145,8 @@
       case 'archiveMonth': renderArchiveMonthView(currentView.period, done); break;
       case 'lostOpps': renderLostOppsView(done); break;
       case 'lostOppReport': renderLostOppReportView(currentView.id, done); break;
+      case 'assigned': renderAssignedView(done); break;
+      case 'assignedReport': renderAssignmentReportView(currentView.id, done); break;
       case 'team': renderTeamView(done); break;
       case 'changePassword': renderChangePasswordView(done); break;
       default: renderDashboard(done);
@@ -150,6 +167,7 @@
     var items = [
       { id: 'dashboard', label: 'Dashboard' },
       { id: 'accounts', label: 'Accounts' },
+      { id: 'assigned', label: 'Assigned' },
       { id: 'archive', label: 'Archive' },
       { id: 'lostOpps', label: 'Lost Opportunities' },
       { id: 'form', label: 'Add Lead' },
@@ -158,7 +176,8 @@
 
     var navHtml = items.map(function (it) {
       var active = currentView.view === it.id ||
-        (it.id === 'archive' && currentView.view === 'archiveMonth');
+        (it.id === 'archive' && currentView.view === 'archiveMonth') ||
+        (it.id === 'assigned' && currentView.view === 'assignedReport');
       return '<li><button data-nav="' + it.id + '" class="' + (active ? 'active' : '') + '">' + esc(it.label) + '</button></li>';
     }).join('');
 
@@ -168,14 +187,34 @@
       '<div class="brand"><div class="brand-title">Yellowjacket</div><div class="brand-sub">Sales CRM</div></div>' +
       '<ul class="nav">' + navHtml + '</ul>' +
       '<div class="rail-foot">' +
+      '<button class="rail-notif-btn" id="notif-bell" type="button">🔔 Notifications' +
+      '<span class="notif-badge" id="notif-badge"' + (notifCount > 0 ? '' : ' hidden') + '>' + (notifCount > 99 ? '99+' : notifCount) + '</span>' +
+      '</button>' +
       '<div class="rail-badge' + (isAdmin() ? ' admin' : '') + '">' + esc(isAdmin() ? 'Admin Mode' : currentUser.name) + '</div>' +
       '<div style="display:flex;flex-direction:column;gap:8px;align-items:flex-start">' +
       '<button id="change-pw-btn">Change Password</button>' +
       '<button id="logout-btn">Log Out</button>' +
       '</div>' +
       '</div>' +
-      '</div>'
+      '</div>' +
+      notifPanelHtml()
     );
+  }
+
+  // The notification bell's dropdown. Opening it fetches AND deletes the
+  // current user's notifications server-side in one call — see
+  // routes/notifications.js — so `notifications` here is simply the last
+  // batch handed back, held in memory just long enough to render it.
+  function notifPanelHtml() {
+    if (!notifPanelOpen) return '';
+    var items = notifications.length
+      ? notifications.map(function (n) {
+          return '<button type="button" class="notif-item" data-open-notif="' + (n.assignment_id || '') + '">' +
+            esc(n.message) + '<span class="notif-time">' + fmtDateTime(n.created_at) + '</span></button>';
+        }).join('')
+      : '<div class="notif-empty">No new notifications.</div>';
+    return '<div class="notif-overlay" id="notif-overlay"></div>' +
+      '<div class="notif-panel"><div class="notif-panel-head">Notifications</div>' + items + '</div>';
   }
 
   /* ---------------- login ---------------- */
@@ -761,6 +800,169 @@
     });
   }
 
+  /* ---------------- assigned (target accounts) ---------------- */
+  function assignmentStatusChip(status) {
+    var isResponded = status === 'responded';
+    var v = isResponded ? '--stage-won' : '--stage-negotiating';
+    return '<span class="chip" style="color:var(' + v + ');border-color:var(' + v + ');background:color-mix(in srgb, var(' + v + ') 14%, transparent)">' +
+      (isResponded ? 'Responded' : 'Open') + '</span>';
+  }
+
+  function renderAssignedView(done) {
+    var url = '/api/assignments' + (isAdmin() && salesmanFilter ? '?salesman_id=' + encodeURIComponent(salesmanFilter) : '');
+    Promise.all([api('GET', url), new Promise(function (resolve) { loadTeamIfAdmin(resolve); })]).then(function (results) {
+      var rows = results[0].assignments;
+      lastAssignmentsList = rows;
+      var openCount = rows.filter(function (a) { return a.status === 'open'; }).length;
+
+      var html = '<div class="view-head"><div><p class="view-kicker">' + rows.length + ' assignment' + (rows.length === 1 ? '' : 's') + ' · ' + openCount + ' awaiting response</p>' +
+        '<h1 class="view-title">Assigned</h1>' +
+        '<p class="view-sub">' + (isAdmin() ?
+          'Send a salesman after a specific target account, with what you know about it so far.' :
+          'Target accounts your admin has asked you to work — open one to respond and let them know where things stand.') +
+        '</p></div>' +
+        (isAdmin() ? '<button class="btn btn-primary" id="btn-add-assignment">+ New Assignment</button>' : '') +
+        '</div>';
+
+      if (isAdmin()) {
+        html += '<div class="toolbar">' + salesmanFilterHtml('q-salesman') + '</div>';
+      }
+      html += '<div id="assignment-form-slot"></div>';
+
+      if (!rows.length) {
+        html += '<div class="table-wrap"><div class="empty-state"><h3>' + (isAdmin() ? 'No assignments yet' : 'Nothing assigned to you yet') + '</h3>' +
+          '<p>' + (isAdmin() ? 'Send a salesman after a target account to get started.' : 'Check back here once your admin sends you a target account.') + '</p>' +
+          (isAdmin() ? '<button class="btn btn-primary" id="btn-add-assignment-2">+ New Assignment</button>' : '') +
+          '</div></div>';
+        return done(html);
+      }
+
+      html += '<div class="table-wrap"><table><thead><tr><th>Target Account</th>' +
+        (isAdmin() ? '<th>Salesman</th>' : '') +
+        '<th>Target Date</th><th>Status</th><th></th></tr></thead><tbody>' +
+        rows.map(function (a) {
+          return '<tr>' +
+            '<td><div class="cell-company">' + esc(a.account_name) + '</div></td>' +
+            (isAdmin() ? '<td>' + esc(a.salesman_name) + '</td>' : '') +
+            '<td class="nowrap">' + (a.target_date ? fmtDate(a.target_date) : '—') + '</td>' +
+            '<td>' + assignmentStatusChip(a.status) + '</td>' +
+            '<td><div class="row-actions">' +
+            '<button class="icon-btn" title="View" data-open-assignment="' + a.id + '">⊙</button>' +
+            (isAdmin() ? '<button class="icon-btn" title="Edit" data-edit-assignment="' + a.id + '">✎</button>' : '') +
+            (isAdmin() ? '<button class="icon-btn" title="Delete" data-delete-assignment="' + a.id + '">✕</button>' : '') +
+            '</div></td>' +
+            '</tr>';
+        }).join('') + '</tbody></table></div>';
+
+      done(html);
+    }).catch(function (err) { done(errorState(err)); });
+  }
+
+  function renderAssignmentReportView(id, done) {
+    api('GET', '/api/assignments/' + id).then(function (data) {
+      var a = data.assignment;
+      var html = '<div class="report-toolbar">' +
+        '<button class="btn btn-ghost" data-nav="assigned">← Back to Assigned</button>' +
+        (isAdmin() ? '<button class="btn btn-ghost" data-delete-assignment="' + a.id + '" data-after="assigned">Delete</button>' : '') +
+        '</div>';
+      html += '<div class="report">' +
+        '<div class="report-head"><div><div class="report-kicker">Target Account Assignment</div><div class="report-id">' + esc(a.assignment_code) + '</div></div></div>' +
+        '<h1 class="report-title">' + esc(a.account_name) + '</h1>' +
+        '<div class="report-status-row">' + assignmentStatusChip(a.status) + '</div>' +
+        '<div class="report-grid">' +
+        rg('Assigned To', a.salesman_name) + rg('Assigned By', a.assigned_by_name) +
+        rg('Target Date', a.target_date ? fmtDate(a.target_date) : '') + rg('Sent', fmtDateTime(a.created_at)) +
+        '</div>' +
+        '<div class="rg-item"><label>Potential Contacts &amp; Information</label><div class="report-notes">' +
+        (a.contact_info ? esc(a.contact_info) : '<span class="empty">None on file.</span>') + '</div></div>' +
+        '<div class="rg-item" style="margin-top:var(--sp-4)"><label>Notes From Admin</label><div class="report-notes">' +
+        (a.notes ? esc(a.notes) : '<span class="empty">No notes.</span>') + '</div></div>';
+
+      html += '<div class="rg-item" style="margin-top:var(--sp-5)"><label>' + (a.response_text ? 'Response' : 'Respond') + '</label>';
+      if (a.response_text) {
+        html += '<div class="report-notes">' + esc(a.response_text) + '</div>' +
+          (a.responded_at ? '<div class="cell-sub" style="margin-top:6px">Responded ' + fmtDateTime(a.responded_at) + '</div>' : '');
+      }
+      html += '<form id="assignment-respond-form" style="margin-top:12px">' +
+        '<textarea id="f-as-response" placeholder="Let your admin know where things stand…">' + esc(a.response_text || '') + '</textarea>' +
+        '<div id="assignment-respond-error"></div>' +
+        '<div class="form-actions"><button type="submit" class="btn btn-primary">' + (a.response_text ? 'Update Response' : 'Send Response') + '</button></div>' +
+        '</form></div>';
+
+      html += '</div>';
+      done(html);
+    }).catch(function (err) { done(errorState(err)); });
+  }
+
+  // Manually built (not the shared selectHtml helper) so a brand-new
+  // assignment starts on a blank "— Select a salesman —" placeholder
+  // instead of silently defaulting to whoever sorts first — the admin has
+  // to actively pick who this target account goes to.
+  function salesmanSelectHtml(id, label, selectedId) {
+    var salesmen = team.filter(function (u) { return u.role === 'salesman'; });
+    var opts = salesmen.map(function (u) {
+      return '<option value="' + u.id + '"' + (String(selectedId) === String(u.id) ? ' selected' : '') + '>' + esc(u.name) + '</option>';
+    }).join('');
+    return '<div class="field"><label>' + esc(label) + ' <span class="req">*</span></label>' +
+      '<select id="f-' + id + '"><option value="">— Select a salesman —</option>' + opts + '</select></div>';
+  }
+
+  function assignmentFormHtml(editing) {
+    var f = editing || {};
+    var idField = editing ? '<input type="hidden" id="f-as-id" value="' + editing.id + '">' : '';
+    return '<div class="panel form-wrap"><form id="assignment-form">' + idField +
+      '<div class="field"><label>Target Account Name <span class="req">*</span></label>' +
+      '<input type="text" id="f-as-account" list="as-account-list" value="' + esc(f.account_name || '') + '" placeholder="Start typing a company name…" autocomplete="off">' +
+      '<datalist id="as-account-list">' + lastAccountNames.map(function (a) { return '<option value="' + esc(a.name) + '">'; }).join('') + '</datalist>' +
+      '<div class="hint">Pick an existing account, or type a new company name to create one.</div></div>' +
+      '<div class="field-row">' +
+      salesmanSelectHtml('as-salesman', 'Assign To Salesman', f.salesman_id) +
+      fieldHtml('as-date', 'Target Date', f.target_date ? String(f.target_date).slice(0, 10) : '', false, 'date') +
+      '</div>' +
+      '<div class="field"><label>Potential Contacts &amp; Information</label><textarea id="f-as-contact">' + esc(f.contact_info || '') + '</textarea></div>' +
+      '<div class="field"><label>Notes — What’s Needed</label><textarea id="f-as-notes">' + esc(f.notes || '') + '</textarea></div>' +
+      '<div id="assignment-form-error"></div>' +
+      '<div class="form-actions"><button type="submit" class="btn btn-primary">' + (editing ? 'Save Changes' : 'Assign') + '</button>' +
+      '<button type="button" class="btn btn-ghost" id="assignment-form-cancel">Cancel</button></div>' +
+      '</form></div>';
+  }
+
+  function openAssignmentForm(editing) {
+    Promise.all([
+      new Promise(function (resolve) { loadTeamIfAdmin(resolve); }),
+      api('GET', '/api/accounts/names').catch(function () { return { accounts: [] }; }),
+    ]).then(function (results) {
+      lastAccountNames = results[1].accounts || [];
+      var slot = document.getElementById('assignment-form-slot');
+      if (!slot) return;
+      slot.innerHTML = assignmentFormHtml(editing);
+      document.getElementById('assignment-form').addEventListener('submit', submitAssignmentForm);
+      document.getElementById('assignment-form-cancel').addEventListener('click', function () { slot.innerHTML = ''; });
+    });
+  }
+
+  function submitAssignmentForm(e) {
+    e.preventDefault();
+    var idEl = document.getElementById('f-as-id');
+    var errEl = document.getElementById('assignment-form-error');
+    var accountName = val('f-as-account');
+    var salesmanId = val('f-as-salesman');
+    if (!accountName) { errEl.innerHTML = '<p class="form-error">Target Account Name is required.</p>'; return; }
+    if (!salesmanId) { errEl.innerHTML = '<p class="form-error">Select which salesman to send this assignment to.</p>'; return; }
+    var body = {
+      account_name: accountName, salesman_id: salesmanId,
+      target_date: val('f-as-date') || null,
+      contact_info: val('f-as-contact'), notes: val('f-as-notes'),
+    };
+    var req = idEl ? api('PUT', '/api/assignments/' + idEl.value, body) : api('POST', '/api/assignments', body);
+    req.then(function () {
+      toast(idEl ? 'Assignment updated.' : 'Assignment sent.');
+      route('assigned');
+    }).catch(function (err) {
+      errEl.innerHTML = '<p class="form-error">' + esc((err.details && err.details[0]) || 'Could not save.') + '</p>';
+    });
+  }
+
   /* ---------------- change password (self-service) ---------------- */
   function renderChangePasswordView(done) {
     var html = '<div class="view-head"><div><h1 class="view-title">Change Password</h1><p class="view-sub">Update the password you sign in with.</p></div></div>';
@@ -845,10 +1047,37 @@
     document.querySelectorAll('[data-open-lost-report]').forEach(function (el) {
       el.addEventListener('click', function () { route('lostOppReport', { id: el.getAttribute('data-open-lost-report') }); });
     });
+    document.querySelectorAll('[data-open-assignment]').forEach(function (el) {
+      el.addEventListener('click', function () { route('assignedReport', { id: el.getAttribute('data-open-assignment') }); });
+    });
+
+    var notifBell = document.getElementById('notif-bell');
+    if (notifBell) notifBell.addEventListener('click', function () {
+      api('GET', '/api/notifications').then(function (data) {
+        notifications = data.notifications || [];
+        notifCount = 0;
+        notifPanelOpen = true;
+        render();
+      }).catch(function () { toast('Could not load notifications.', true); });
+    });
+    var notifOverlay = document.getElementById('notif-overlay');
+    if (notifOverlay) notifOverlay.addEventListener('click', function () { notifPanelOpen = false; render(); });
+    document.querySelectorAll('[data-open-notif]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        notifPanelOpen = false;
+        var assignmentId = btn.getAttribute('data-open-notif');
+        if (assignmentId) route('assignedReport', { id: assignmentId });
+        else render();
+      });
+    });
 
     var logoutBtn = document.getElementById('logout-btn');
     if (logoutBtn) logoutBtn.addEventListener('click', function () {
-      api('POST', '/api/auth/logout').then(function () { currentUser = null; loginMode = 'salesman'; loginError = ''; loadRoster(function () { render(); }); });
+      api('POST', '/api/auth/logout').then(function () {
+        currentUser = null; loginMode = 'salesman'; loginError = '';
+        stopNotifPolling();
+        loadRoster(function () { render(); });
+      });
     });
 
     var changePwBtn = document.getElementById('change-pw-btn');
@@ -1011,6 +1240,54 @@
       });
     });
 
+    var addAssignmentBtn = document.getElementById('btn-add-assignment');
+    if (addAssignmentBtn) addAssignmentBtn.addEventListener('click', function () { openAssignmentForm(null); });
+    var addAssignmentBtn2 = document.getElementById('btn-add-assignment-2');
+    if (addAssignmentBtn2) addAssignmentBtn2.addEventListener('click', function () { openAssignmentForm(null); });
+    document.querySelectorAll('[data-edit-assignment]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-edit-assignment');
+        var record = null;
+        for (var i = 0; i < lastAssignmentsList.length; i++) {
+          if (String(lastAssignmentsList[i].id) === String(id)) { record = lastAssignmentsList[i]; break; }
+        }
+        openAssignmentForm(record);
+      });
+    });
+    document.querySelectorAll('[data-delete-assignment]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-delete-assignment');
+        var key = 'assignment-' + id;
+        if (deleteArmed !== key) {
+          deleteArmed = key;
+          btn.textContent = '✕';
+          btn.title = 'Confirm delete?';
+          setTimeout(function () { if (deleteArmed === key) deleteArmed = null; }, 4000);
+          return;
+        }
+        deleteArmed = null;
+        api('DELETE', '/api/assignments/' + id).then(function () {
+          toast('Assignment removed.');
+          var after = btn.getAttribute('data-after');
+          route(after || 'assigned');
+        }).catch(function () { toast('Could not delete.', true); });
+      });
+    });
+    var respondForm = document.getElementById('assignment-respond-form');
+    if (respondForm) respondForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var errEl = document.getElementById('assignment-respond-error');
+      var text = val('f-as-response');
+      if (!text) { errEl.innerHTML = '<p class="form-error">Enter a response before sending.</p>'; return; }
+      var assignmentId = currentView.id;
+      api('POST', '/api/assignments/' + assignmentId + '/respond', { response_text: text }).then(function () {
+        toast('Response sent.');
+        route('assignedReport', { id: assignmentId });
+      }).catch(function (err) {
+        errEl.innerHTML = '<p class="form-error">' + esc((err.details && err.details[0]) || 'Could not send.') + '</p>';
+      });
+    });
+
     var addUserForm = document.getElementById('add-user-form');
     if (addUserForm) addUserForm.addEventListener('submit', function (e) {
       e.preventDefault();
@@ -1060,6 +1337,7 @@
     api('POST', '/api/auth/login', { name: name, password: password }).then(function (data) {
       currentUser = data.user;
       loginError = '';
+      startNotifPolling();
       route('dashboard');
     }).catch(function () {
       loginError = 'Incorrect name or password.';
@@ -1067,11 +1345,39 @@
     });
   }
 
+  /* ---------------- notifications (badge polling) ---------------- */
+  // Non-destructive — only the bell click (see wireView) actually fetches
+  // and clears notifications. This just keeps the badge count current
+  // while the CRM is open, without disturbing whatever the user is doing.
+  function pollNotifCount() {
+    if (!currentUser) return;
+    api('GET', '/api/notifications/count').then(function (data) {
+      notifCount = data.count || 0;
+      var badge = document.getElementById('notif-badge');
+      if (badge) {
+        badge.textContent = notifCount > 99 ? '99+' : String(notifCount);
+        badge.hidden = notifCount === 0;
+      }
+    }).catch(function () {});
+  }
+  function startNotifPolling() {
+    pollNotifCount();
+    if (notifPollTimer) return;
+    notifPollTimer = setInterval(pollNotifCount, 25000);
+  }
+  function stopNotifPolling() {
+    if (notifPollTimer) { clearInterval(notifPollTimer); notifPollTimer = null; }
+    notifCount = 0;
+    notifications = [];
+    notifPanelOpen = false;
+  }
+
   /* ---------------- boot ---------------- */
   function boot() {
     api('GET', '/api/auth/me').then(function (data) {
       currentUser = data.user;
       if (currentUser) {
+        startNotifPolling();
         route('dashboard');
       } else {
         loadRoster(function () { render(); });
