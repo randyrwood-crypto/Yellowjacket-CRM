@@ -13,6 +13,8 @@ const accountsRoutes = require('./routes/accounts');
 const lostOppRoutes = require('./routes/lostOpportunities');
 const teamRoutes = require('./routes/team');
 const statsRoutes = require('./routes/stats');
+const assignmentsRoutes = require('./routes/assignments');
+const notificationsRoutes = require('./routes/notifications');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -72,6 +74,8 @@ app.use('/api/accounts', accountsRoutes);
 app.use('/api/lost-opportunities', lostOppRoutes);
 app.use('/api/team', teamRoutes);
 app.use('/api/stats', statsRoutes);
+app.use('/api/assignments', assignmentsRoutes);
+app.use('/api/notifications', notificationsRoutes);
 
 app.get('/healthz', (req, res) => res.json({ ok: true }));
 
