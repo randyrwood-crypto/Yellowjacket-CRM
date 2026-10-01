@@ -320,6 +320,16 @@ function validateBody(body) {
   return errors;
 }
 
+// service_type is a TEXT[] in the database (a lead can need more than one
+// service) — this accepts an array from the multi-select checkboxes on the
+// lead form, but also tolerates a single string (an older client, or a
+// manual API call) so neither shape blows up the insert/update below.
+function normalizeServiceTypes(v) {
+  if (Array.isArray(v)) return v.map((s) => String(s).trim()).filter(Boolean);
+  if (v) return [String(v).trim()].filter(Boolean);
+  return [];
+}
+
 // POST /api/leads — create. Salesmen are always tagged with their own id,
 // regardless of what (if anything) is sent for salesman_id — enforced here,
 // not just hidden in the UI. account_name matches an existing account
@@ -356,7 +366,7 @@ router.post('/', async (req, res, next) => {
       [
         leadCode, account.name, account.id,
         body.contact || '', body.phone || '', body.email || '',
-        body.site || '', body.county || '', body.location || '', body.service_type || '',
+        body.site || '', body.county || '', body.location || '', normalizeServiceTypes(body.service_type),
         body.stage || 'New Lead', Number(body.deal_value) || 0, salesmanId,
         todayISODate(), body.next_follow_up || null, body.notes || '',
         currentPeriod(),
@@ -404,7 +414,7 @@ router.put('/:id', async (req, res, next) => {
        WHERE id=$16`,
       [
         account.name, account.id, body.contact || '', body.phone || '', body.email || '',
-        body.site || '', body.county || '', body.location || '', body.service_type || '',
+        body.site || '', body.county || '', body.location || '', normalizeServiceTypes(body.service_type),
         body.stage || 'New Lead', Number(body.deal_value) || 0, salesmanId,
         todayISODate(), body.next_follow_up || null, body.notes || '',
         req.params.id,
