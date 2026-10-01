@@ -36,6 +36,27 @@ CREATE TABLE IF NOT EXISTS leads (
 CREATE INDEX IF NOT EXISTS idx_leads_salesman ON leads(salesman_id);
 CREATE INDEX IF NOT EXISTS idx_leads_period ON leads(period);
 
+-- service_type started as a single value; a lead can now need more than
+-- one service, so it's a TEXT[] (e.g. '{"Wireline","Workover"}'). Guarded
+-- on the column's current type (information_schema), not IF NOT EXISTS,
+-- since this is a type change on an existing column, not a new one —
+-- re-running this after it's already TEXT[] is a no-op. Any existing
+-- single value is wrapped into a one-element array so nothing on file is
+-- lost.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'leads' AND column_name = 'service_type' AND data_type = 'text'
+  ) THEN
+    ALTER TABLE leads ALTER COLUMN service_type DROP DEFAULT;
+    ALTER TABLE leads ALTER COLUMN service_type TYPE TEXT[] USING (
+      CASE WHEN service_type IS NULL OR service_type = '' THEN ARRAY[]::TEXT[] ELSE ARRAY[service_type] END
+    );
+    ALTER TABLE leads ALTER COLUMN service_type SET DEFAULT ARRAY[]::TEXT[];
+  END IF;
+END $$;
+
 -- An Account is one company/customer — the persistent record a customer's
 -- leads are grouped under, so the same company's history lives in one
 -- place instead of scattered, disconnected lead rows. "company" on leads
