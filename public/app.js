@@ -43,6 +43,13 @@
     n = Number(n) || 0;
     return '$' + n.toLocaleString('en-US', { maximumFractionDigits: 0 });
   }
+  // service_type comes back from the API as an array (a lead can need more
+  // than one service) — this renders it as a comma-separated list anywhere
+  // it's just being displayed, not edited.
+  function svcList(v) {
+    if (Array.isArray(v)) return v.join(', ');
+    return v || '';
+  }
   function fmtDate(iso) {
     if (!iso) return '';
     var d = String(iso).slice(0, 10);
@@ -422,7 +429,7 @@
           '<td class="nowrap">' + esc(l.lead_code) + '</td>' +
           '<td>' + esc(l.contact || '—') + '<div class="cell-sub">' + esc(l.phone || '') + '</div></td>' +
           '<td>' + esc(l.site || '—') + '<div class="cell-sub">' + esc(l.county || '') + '</div></td>' +
-          '<td>' + esc(l.service_type || '—') + '</td>' +
+          '<td>' + esc(svcList(l.service_type) || '—') + '</td>' +
           '<td>' + stageChip(l.stage) + '</td>' +
           '<td class="money">' + fmtMoney(l.deal_value) + '</td>' +
           '<td>' + esc(l.salesman_name || '—') + '</td>' +
@@ -494,7 +501,8 @@
         html += fieldHtml('email', 'Email', f.email);
         html += '<div class="field-row">' + fieldHtml('site', 'Lease / Well / Site Name', f.site) + fieldHtml('county', 'County / Basin', f.county) + '</div>';
         html += fieldHtml('location', 'Location / Address', f.location);
-        html += '<div class="field-row">' + selectHtml('service_type', 'Service Type Needed', f.service_type, SERVICE_TYPES) + selectHtml('stage', 'Pipeline Stage', f.stage, STAGES) + '</div>';
+        html += checkboxGroupHtml('service_type', 'Service Type(s) Needed', f.service_type, SERVICE_TYPES);
+        html += selectHtml('stage', 'Pipeline Stage', f.stage, STAGES);
         if (isAdmin()) {
           html += '<div class="field-row">' + fieldHtml('deal_value', 'Est. Deal Value ($)', f.deal_value, false, 'number') +
             selectHtml('salesman_id', 'Salesman', String(f.salesman_id || currentUser.id), null, team.filter(function(u){return u.role==='salesman';}).map(function (u) { return { value: u.id, label: u.name }; })) + '</div>';
@@ -532,6 +540,22 @@
     }
     return '<div class="field"><label>' + esc(label) + '</label><select id="f-' + key + '">' + (objectOptions ? '' : '<option value="">— Select —</option>') + opts + '</select></div>';
   }
+  // A group of checkboxes standing in for a multi-select — `selected` can
+  // be an array (the normal case, since service_type is stored as one) or
+  // a single string (editing a record saved before this existed). Each
+  // checkbox is tagged data-group="<key>" so checkedValues() can collect
+  // them back into an array on submit without needing individual ids.
+  function checkboxGroupHtml(key, label, selected, options) {
+    var selectedArr = Array.isArray(selected) ? selected : (selected ? [selected] : []);
+    var opts = options.map(function (o, i) {
+      var checked = selectedArr.indexOf(o) !== -1 ? ' checked' : '';
+      return '<label class="checkbox-opt"><input type="checkbox" data-group="' + key + '" id="f-' + key + '-' + i + '" value="' + esc(o) + '"' + checked + '> ' + esc(o) + '</label>';
+    }).join('');
+    return '<div class="field"><label>' + esc(label) + '</label><div class="checkbox-group">' + opts + '</div></div>';
+  }
+  function checkedValues(key) {
+    return Array.prototype.slice.call(document.querySelectorAll('[data-group="' + key + '"]:checked')).map(function (el) { return el.value; });
+  }
   function val(id) { var el = document.getElementById(id); return el ? el.value.trim() : ''; }
 
   function loadTeamIfAdmin(cb) {
@@ -552,7 +576,7 @@
       account_name: accountName,
       contact: val('f-contact'), phone: val('f-phone'), email: val('f-email'),
       site: val('f-site'), county: val('f-county'), location: val('f-location'),
-      service_type: val('f-service_type'), stage: val('f-stage') || 'New Lead',
+      service_type: checkedValues('service_type'), stage: val('f-stage') || 'New Lead',
       deal_value: Number(val('f-deal_value')) || 0,
       next_follow_up: val('f-next_follow_up') || null,
       notes: val('f-notes'),
@@ -594,7 +618,7 @@
         (od ? '<span class="chip" style="color:var(--overdue);border-color:var(--overdue)">Follow-up overdue</span>' : '') + '</div>' +
         '<div class="report-grid">' +
         rg('Contact', l.contact) + rg('Phone', l.phone) + rg('Email', l.email) + rg('Salesman', l.salesman_name) +
-        rg('Lease / Well / Site', l.site) + rg('County / Basin', l.county) + rg('Location / Address', l.location) + rg('Service Type', l.service_type) +
+        rg('Lease / Well / Site', l.site) + rg('County / Basin', l.county) + rg('Location / Address', l.location) + rg('Service Type', svcList(l.service_type)) +
         rg('Last Contact', l.last_contact ? fmtDate(l.last_contact) : '') + rg('Next Follow-Up', l.next_follow_up ? fmtDate(l.next_follow_up) : '') +
         '</div>' +
         '<div class="rg-item"><label>Notes</label><div class="report-notes">' + (l.notes ? esc(l.notes) : '<span class="empty">No notes on file.</span>') + '</div></div>';
