@@ -334,11 +334,12 @@ function normalizeServiceTypes(v) {
 // regardless of what (if anything) is sent for salesman_id — enforced here,
 // not just hidden in the UI. account_name matches an existing account
 // (case-insensitively) or creates a new one on the spot. last_contact is
-// always stamped to today: the moment a lead is touched (created or,
-// below, edited) IS the contact. `company` is still written too, only as
-// the historical snapshot column described in db/schema.sql — the app
-// never reads it back. contact/phone/email belong to THIS lead (this
-// opportunity's point of contact at the account), not the account itself.
+// salesman-editable (so a backfilled log can carry its real activity date
+// instead of the day it was typed in) — it defaults to today only when
+// nothing was sent. `company` is still written too, only as the historical
+// snapshot column described in db/schema.sql — the app never reads it
+// back. contact/phone/email belong to THIS lead (this opportunity's point
+// of contact at the account), not the account itself.
 router.post('/', async (req, res, next) => {
   try {
     const body = req.body || {};
@@ -368,7 +369,7 @@ router.post('/', async (req, res, next) => {
         body.contact || '', body.phone || '', body.email || '',
         body.site || '', body.county || '', body.location || '', normalizeServiceTypes(body.service_type),
         body.stage || 'New Lead', Number(body.deal_value) || 0, salesmanId,
-        todayISODate(), body.next_follow_up || null, body.notes || '',
+        body.last_contact || todayISODate(), body.next_follow_up || null, body.notes || '',
         currentPeriod(),
       ]
     );
@@ -383,9 +384,10 @@ router.post('/', async (req, res, next) => {
 // PUT /api/leads/:id — update. Salesmen may only edit their own lead, and
 // may never change who it's assigned to; admins may edit anything,
 // including reassigning the salesman. account_name can move the lead to a
-// different (or brand-new) account, same matching rules as create. Every
-// save re-stamps last_contact to today, same as creating one — touching
-// the lead at all counts as contact.
+// different (or brand-new) account, same matching rules as create.
+// last_contact carries whatever the form sent (it's an editable date, not
+// an auto-stamp — see POST above), falling back to the existing value so a
+// save never blanks it out.
 router.put('/:id', async (req, res, next) => {
   try {
     const existing = await getLeadOr404(req, res);
@@ -416,7 +418,7 @@ router.put('/:id', async (req, res, next) => {
         account.name, account.id, body.contact || '', body.phone || '', body.email || '',
         body.site || '', body.county || '', body.location || '', normalizeServiceTypes(body.service_type),
         body.stage || 'New Lead', Number(body.deal_value) || 0, salesmanId,
-        todayISODate(), body.next_follow_up || null, body.notes || '',
+        body.last_contact || existing.last_contact || todayISODate(), body.next_follow_up || null, body.notes || '',
         req.params.id,
       ]
     );
