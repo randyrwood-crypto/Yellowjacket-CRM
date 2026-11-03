@@ -12,6 +12,7 @@
   var currentView = { view: 'login' };
   var tableFilter = { q: '' }; // Accounts search box
   var salesmanFilter = ''; // admin-only, shared across Accounts / Lost Opportunities / Archive
+  var bySalesmanPeriod = ''; // admin-only; '' means "not picked yet" — defaults to the current month on first render
   var loginMode = 'salesman';
   var loginError = '';
   var roster = [];
@@ -59,6 +60,13 @@
   }
   function todayISO() {
     return new Date().toISOString().slice(0, 10);
+  }
+  // Mirrors the server's currentPeriod() (routes/leads.js) — only used to
+  // offer the current month as an option in the By Salesman period picker,
+  // never sent as a value the server trusts on its own.
+  function currentPeriodClient() {
+    var d = new Date();
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
   }
   function fmtDateTime(iso) {
     if (!iso) return '';
@@ -154,6 +162,7 @@
       case 'lostOppReport': renderLostOppReportView(currentView.id, done); break;
       case 'assigned': renderAssignedView(done); break;
       case 'assignedReport': renderAssignmentReportView(currentView.id, done); break;
+      case 'bySalesman': renderBySalesmanView(done); break;
       case 'team': renderTeamView(done); break;
       case 'changePassword': renderChangePasswordView(done); break;
       default: renderDashboard(done);
@@ -179,6 +188,7 @@
       { id: 'lostOpps', label: 'Lost Opportunities' },
       { id: 'form', label: 'Add Lead' },
     ];
+    if (isAdmin()) items.push({ id: 'bySalesman', label: 'By Salesman' });
     if (isAdmin()) items.push({ id: 'team', label: 'Team' });
 
     var navHtml = items.map(function (it) {
@@ -511,7 +521,8 @@
             '<div class="field"><label>Salesman</label><input type="text" value="' + esc(editing ? editing.salesman_name : currentUser.name) + '" disabled></div></div>';
         }
         html += '<div class="field-row">' + fieldHtml('next_follow_up', 'Next Follow-Up', f.next_follow_up ? String(f.next_follow_up).slice(0,10) : '', false, 'date') +
-          '<div class="field"><label>Last Contact</label><input type="text" value="' + (editing ? esc(fmtDate(editing.last_contact)) : 'Today, once saved') + '" disabled></div></div>';
+          fieldHtml('last_contact', 'Last Contact', f.last_contact ? String(f.last_contact).slice(0,10) : todayISO(), false, 'date') + '</div>';
+        html += '<div class="hint" style="margin:-10px 0 var(--sp-4)">Defaults to today — change this if you\'re backfilling a past activity.</div>';
         html += '<div class="field"><label>Notes</label><textarea id="f-notes">' + esc(f.notes || '') + '</textarea></div>';
         html += '<div id="form-error"></div>';
         html += '<div class="form-actions"><button type="submit" class="btn btn-primary">' + (editing ? 'Save Changes' : '✓ Save Lead') + '</button>' +
@@ -579,6 +590,7 @@
       service_type: checkedValues('service_type'), stage: val('f-stage') || 'New Lead',
       deal_value: Number(val('f-deal_value')) || 0,
       next_follow_up: val('f-next_follow_up') || null,
+      last_contact: val('f-last_contact') || null,
       notes: val('f-notes'),
     };
     if (isAdmin()) body.salesman_id = val('f-salesman_id');
@@ -722,6 +734,81 @@
               '<td style="text-align:right"><button class="icon-btn" title="View" data-open-lost-report="' + o.id + '">⊙</button></td></tr>';
           }).join('') + '</tbody></table></div>';
       }
+      done(html);
+    }).catch(function (err) { done(errorState(err)); });
+  }
+
+  /* ---------------- by salesman (admin, monthly) ---------------- */
+  // One panel per salesman for a chosen month: their accounts/leads with
+  // totals, plus a lost-opportunities count, so an admin can see everyone's
+  // month side by side instead of filtering Accounts/Archive one person at
+  // a time. Reuses the same /api/leads and /api/lost-opportunities period
+  // endpoints Archive already uses — grouping by salesman happens here on
+  // the client, no new backend route needed.
+  function renderBySalesmanView(done) {
+    if (!bySalesmanPeriod) bySalesmanPeriod = currentPeriodClient();
+    var period = bySalesmanPeriod;
+    Promise.all([
+      api('GET', '/api/leads?period=' + encodeURIComponent(period)),
+      api('GET', '/api/lost-opportunities?period=' + encodeURIComponent(period)),
+      api('GET', '/api/leads/periods'),
+      new Promise(function (resolve) { loadTeamIfAdmin(resolve); }),
+    ]).then(function (results) {
+      var leads = results[0].leads;
+      var lost = results[1].lostOpportunities;
+      var pastPeriods = results[2].periods; // backend excludes the current period from this list
+      var periodOptions = Array.from(new Set([currentPeriodClient()].concat(pastPeriods))).sort().reverse();
+      var salesmen = team.filter(function (u) { return u.role === 'salesman'; })
+        .slice().sort(function (a, b) { return a.name.localeCompare(b.name); });
+
+      var html = '<div class="view-head"><div><p class="view-kicker">' + esc(monthLabel(period)) + '</p>' +
+        '<h1 class="view-title">By Salesman</h1>' +
+        '<p class="view-sub">Every salesman’s accounts and activity for the month, side by side.</p></div>' +
+        '<div class="field" style="margin:0;min-width:210px"><select id="bs-period" class="filter-sel" style="width:100%">' +
+        periodOptions.map(function (p) { return '<option value="' + esc(p) + '"' + (p === period ? ' selected' : '') + '>' + esc(monthLabel(p)) + '</option>'; }).join('') +
+        '</select></div></div>';
+
+      if (!salesmen.length) {
+        html += '<div class="table-wrap"><div class="empty-state"><h3>No salesmen on the team yet</h3><p>Add salesmen from the Team page to see them here.</p></div></div>';
+        return done(html);
+      }
+
+      html += salesmen.map(function (s) {
+        var theirLeads = leads.filter(function (l) { return l.salesman_id === s.id; });
+        var theirLost = lost.filter(function (o) { return o.salesman_id === s.id; });
+        var pipelineValue = theirLeads.reduce(function (a, l) { return a + Number(l.deal_value || 0); }, 0);
+        var wonValue = theirLeads.reduce(function (a, l) { return a + Number(l.won_to_date || 0); }, 0);
+        var lostValue = theirLost.reduce(function (a, o) { return a + Number(o.potential_revenue_loss || 0); }, 0);
+
+        var body;
+        if (!theirLeads.length) {
+          body = '<div class="empty-state" style="padding:18px 0"><p style="margin:0">No accounts logged this month.</p></div>';
+        } else {
+          body = '<div class="table-wrap"><table><thead><tr><th>Account</th><th>Contact</th><th>Stage</th><th>Deal Value</th><th>Next Follow-Up</th><th>Won To Date</th><th></th></tr></thead><tbody>' +
+            theirLeads.map(function (l) {
+              var od = isOverdue(l);
+              return '<tr>' +
+                '<td><div class="cell-company">' + esc(l.company) + '</div></td>' +
+                '<td>' + esc(l.contact || '—') + '</td>' +
+                '<td>' + stageChip(l.stage) + '</td>' +
+                '<td class="money">' + fmtMoney(l.deal_value) + '</td>' +
+                '<td class="nowrap" style="' + (od ? 'color:var(--overdue);font-weight:700' : '') + '">' + (l.next_follow_up ? fmtDate(l.next_follow_up) : '—') + (od ? ' ⚠' : '') + '</td>' +
+                '<td class="money" style="color:var(--stage-won)">' + fmtMoney(l.won_to_date) + '</td>' +
+                '<td style="text-align:right"><button class="icon-btn" title="View" data-open-report="' + l.id + '">⊙</button></td>' +
+                '</tr>';
+            }).join('') + '</tbody></table></div>';
+        }
+
+        return '<div class="panel" style="margin-bottom:var(--sp-5)">' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--sp-4)"><h2 class="panel-title" style="margin:0">' + esc(s.name) + '</h2></div>' +
+          '<div class="hl-bar" style="margin-bottom:var(--sp-4)">' +
+          '<div class="hl-seg"><div class="hl-label">Accounts</div><div class="hl-value">' + theirLeads.length + '</div></div>' +
+          '<div class="hl-seg"><div class="hl-label">Pipeline Value</div><div class="hl-value">' + fmtMoney(pipelineValue) + '</div></div>' +
+          '<div class="hl-seg"><div class="hl-label">Won This Month</div><div class="hl-value" style="color:var(--stage-won)">' + fmtMoney(wonValue) + '</div></div>' +
+          '<div class="hl-seg"><div class="hl-label">Lost Opportunities</div><div class="hl-value" style="color:var(--overdue)">' + theirLost.length + (lostValue ? ' · ' + fmtMoney(lostValue) : '') + '</div></div>' +
+          '</div>' + body + '</div>';
+      }).join('');
+
       done(html);
     }).catch(function (err) { done(errorState(err)); });
   }
@@ -1354,6 +1441,8 @@
     if (qSalesman) qSalesman.addEventListener('change', function () { salesmanFilter = qSalesman.value; render(); });
     var qSalesmanArchive = document.getElementById('q-salesman-archive');
     if (qSalesmanArchive) qSalesmanArchive.addEventListener('change', function () { salesmanFilter = qSalesmanArchive.value; render(); });
+    var bsPeriod = document.getElementById('bs-period');
+    if (bsPeriod) bsPeriod.addEventListener('change', function () { bySalesmanPeriod = bsPeriod.value; render(); });
   }
 
   function doLogin(name, password) {
